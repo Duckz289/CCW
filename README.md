@@ -1,57 +1,62 @@
 # Claude Cache Warden
 
-Claude Cache Warden is a lightweight Tauri desktop utility for inspecting and cleaning Claude Desktop / Cowork cache growth on macOS and Windows.
+Claude Cache Warden là ứng dụng desktop nhẹ viết bằng Tauri, dùng để quét và dọn cache của Claude Desktop / Cowork trên Windows và macOS.
 
-It is intentionally local-only:
+Ứng dụng được thiết kế theo hướng local-only:
 
-- no telemetry
-- no backend service
-- no admin/root requirement for the supported cache paths
-- guarded deletion limited to known Claude cache roots
+- không telemetry
+- không backend service
+- không yêu cầu quyền admin/root với các đường dẫn cache được hỗ trợ
+- chỉ cho phép xóa trong các root cache Claude đã biết
 
-## Stack
+## Công nghệ sử dụng
 
 - Tauri v2
 - Rust backend
 - React + TypeScript frontend
 - Tailwind CSS
-- Public GitHub API for known-issue status
+- GitHub API công khai để hiển thị trạng thái lỗi đã biết
 
-## Features
+## Tính năng
 
-- Recursive cache scan with size, file count, folder count, and safety classification.
-- Treemap-style visual breakdown.
-- Manual cleanup of selected cache directories.
-- Process check for Claude Desktop before cleanup.
-- Automatic cleanup with OR logic:
-  - scheduled time
-  - size threshold in GB
-- Growth-rate alerting in GB/hour using local samples.
-- System tray icon with show, scan, and quit actions.
-- Cleanup history.
-- JSON report export for bug reports.
-- Known Issues tab fetching public GitHub issue status for:
-  - anthropics/claude-code#43390
-  - anthropics/claude-code#37617
-  - anthropics/claude-code#34602
+- Quét đệ quy cache, hiện dung lượng, số file, số thư mục và mức độ an toàn.
+- Hiển thị treemap để nhìn nhanh khu vực nào đang chiếm nhiều dung lượng.
+- Dọn thủ công các thư mục cache được chọn.
+- Kiểm tra trạng thái Claude trước khi dọn.
+- Dọn tự động theo một trong hai điều kiện:
+  - đến giờ lịch
+  - vượt ngưỡng dung lượng (GB)
+- Cảnh báo tốc độ tăng cache theo GB/giờ dựa trên mẫu local.
+- System tray icon với các thao tác show, scan và quit.
+- Lịch sử cleanup.
+- Xuất báo cáo JSON để gửi bug report.
+- Tab Known Issues lấy trạng thái issue công khai từ:
+  - `anthropics/claude-code#43390`
+  - `anthropics/claude-code#37617`
+  - `anthropics/claude-code#34602`
 
-## Mascot States
+## Mascot
 
-The React UI uses the pixel-art frog assets in `action/` as the central status layer for the Overview screen.
+Giao diện sử dụng bộ sprite ếch pixel-art trong thư mục `action/` làm lớp trạng thái trung tâm cho màn hình Tổng quan.
 
-- Idle: `NORMAL.png` plus `OPEN_CLOSE_EYES/OPEN.png` and `CLOSE.png` loop at a low frame rate while the app is standing by.
-- Alert: `ALERT/UP.png` and `DOWN.png` loop when `growth.active === true`, matching the abnormal growth-rate warning.
-- Cleaning: `THROW_TRASH/BIN_NOR.png`, `BIN_NO.png`, `BIN_W_FOLDER.png`, and `BIN_FOLDER_END.png` play once when the user presses `Clean now`. After cleanup finishes, the mascot returns to either Idle or Alert based on the refreshed growth state.
+- Idle: `NORMAL.png` kết hợp `OPEN_CLOSE_EYES/OPEN.png` và `CLOSE.png`, lặp chậm khi app đang chờ.
+- Alert: `ALERT/UP.png` và `DOWN.png`, lặp khi `growth.active === true`.
+- Cleaning: `THROW_TRASH/BIN_NOR.png`, `BIN_NO.png`, `BIN_W_FOLDER.png`, `BIN_FOLDER_END.png`, phát một lần khi bấm `Clean now`.
 
-The animation is intentionally frame-by-frame with `image-rendering: pixelated`; do not tween or blur between frames.
+Animation được giữ theo kiểu frame-by-frame với `image-rendering: pixelated`; không tween và không blur giữa các frame.
 
-## Localization
+## Đa ngôn ngữ
 
-UI copy is separated in `src/i18n.ts` with independent English (`en`) and Vietnamese (`vi`) dictionaries. The header language switch stores the user's choice in `localStorage` under `ccw-language`.
+Nội dung UI được tách trong `src/i18n.ts` với hai bộ từ điển riêng:
 
-Backend scan data can still contain raw technical paths or unknown folder names. The frontend localizes known cache-root labels, safety descriptions, growth messages, issue states, and cleanup triggers while leaving unknown values unchanged.
+- `en`: tiếng Anh
+- `vi`: tiếng Việt
 
-## Scanned Paths
+Lựa chọn ngôn ngữ được lưu trong `localStorage` với key `ccw-language`.
+
+Dữ liệu quét từ backend vẫn có thể chứa path kỹ thuật hoặc tên thư mục chưa được đặt nhãn. Frontend chỉ nội địa hóa các nhãn đã biết như cache-root label, safety description, growth message, issue state và cleanup trigger.
+
+## Đường dẫn được quét
 
 macOS:
 
@@ -70,91 +75,138 @@ Windows:
 ```text
 %APPDATA%\Claude\
 %LOCALAPPDATA%\Claude\
+%LOCALAPPDATA%\Claude-3p\
+%LOCALAPPDATA%\Temp\claude\
+%LOCALAPPDATA%\Packages\Claude_*\LocalCache\
+%LOCALAPPDATA%\Packages\Claude_*\TempState\
+%LOCALAPPDATA%\Packages\Claude_*\LocalState\
+%LOCALAPPDATA%\Packages\Claude_*\RoamingState\
+%LOCALAPPDATA%\Packages\Claude_*\Settings\
+%LOCALAPPDATA%\Packages\Claude_*\AC\
+%LOCALAPPDATA%\Packages\Claude_*\SystemAppData\
 ```
 
-The app detects the OS at runtime and resolves the matching user-profile paths.
+App tự nhận diện hệ điều hành lúc runtime và resolve các đường dẫn phù hợp theo user profile hiện tại.
 
-## Safety Model
+## Mô hình an toàn
 
-Cleanup is blocked unless the selected path is inside a known Claude cache root.
+Cleanup chỉ được phép khi path nằm trong một Claude cache root đã biết.
 
-Default cleanup selects only locations explicitly marked for default cleanup, such as verified renderer cache, code cache, and warm VM bundle cache. Some newly observed cache-like locations can still be labeled `Safe` while staying out of the default cleanup set until debug logs confirm their contents. Top-level Claude folders, config-like folders, and session-like folders are classified as `NotRecommended` and are refused by the backend cleanup command.
+Lựa chọn mặc định chỉ tự động chọn các vị trí được đánh dấu cho default cleanup, ví dụ:
 
-If Claude Desktop is running, cleanup is blocked unless the user explicitly enables cleanup while Claude is running.
+- renderer cache
+- code cache
+- warm VM bundle cache
+- Claude temp files
 
-## Known Limitations
+Một số vị trí mới trông thấy có thể được gán nhãn `Safe` nhưng vẫn không vào default cleanup cho đến khi debug output xác nhận nội dung bên trong. Các thư mục Claude cấp cao, thư mục giống config, và thư mục giống session sẽ bị gán `NotRecommended` và backend từ chối xóa.
 
-- Windows safe-folder classification still depends on verifying real child folder names under both conventional Claude roots and Microsoft Store package roots. In debug builds, or when `CCW_DEBUG_WINDOWS_ROOTS=1` is set, scans log direct child directory names and include one deeper size report for Store `LocalCache` roots so the classifier can be updated from real data instead of guessed names.
-- On this Windows test machine, Claude Desktop processes were observed as exact process name `claude` with executable path ending in `Claude.exe`, while `%APPDATA%\Claude\` and `%LOCALAPPDATA%\Claude\` did not exist. The app now detects the Store package root, but keeps newly observed Store cache locations out of automatic/default cleanup until the logged contents are reviewed.
-- Automatic cleanup checks the scheduler flag every minute, but full recursive scans are throttled to about every 10 minutes unless the root directory mtimes change. Manual scans still run immediately.
+Nếu Claude đang mở hoặc đang chạy nền và khóa file cache, cleanup sẽ bị chặn trừ khi người dùng chủ động bật tùy chọn cho phép cleanup khi Claude đang chạy.
+
+## Trạng thái Claude
+
+App phân biệt 3 trạng thái:
+
+- `Not detected`: không phát hiện process Claude
+- `Background`: không có cửa sổ hiển thị, nhưng vẫn còn process Claude đang chạy nền
+- `Window`: Claude đang có cửa sổ hiển thị
+
+Trạng thái `Background` rất quan trọng trên Windows, vì Claude có thể đã đóng cửa sổ nhưng vẫn khóa các file như `DIPS`, `DIPS-wal`, `journal.baj`. Trong trường hợp này app sẽ chặn cleanup và báo người dùng thoát hẳn Claude từ tray hoặc Task Manager.
+
+## Giới hạn hiện tại
+
+- Windows safe-folder classification vẫn phụ thuộc vào việc đối chiếu tên thư mục con thực tế trong các Claude roots thông thường và Microsoft Store package roots.
+- Automatic cleanup kiểm tra scheduler mỗi phút, nhưng full recursive scan được giảm tần suất xấp xỉ 10 phút trừ khi mtime của root thay đổi.
+- macOS đã có logic scan path và icon bundle, nhưng bản phát hành hiện tại mới được verify build/runtime trên Windows.
 
 ## Development
 
-Install prerequisites:
+Yêu cầu:
 
 - Node.js 20+
 - Rust stable toolchain
 - Tauri platform prerequisites:
   - macOS: Xcode Command Line Tools
-  - Windows: Microsoft C++ Build Tools and WebView2 runtime
+  - Windows: Microsoft C++ Build Tools và WebView2 runtime
 
-Install dependencies:
+Cài dependency:
 
 ```bash
 npm install
 ```
 
-Run the web UI only:
+Chạy web UI:
 
 ```bash
 npm run dev
 ```
 
-Run the Tauri app:
+Chạy Tauri app:
 
 ```bash
 npm run tauri:dev
 ```
 
-Build production bundles:
+Build bundle production:
 
 ```bash
 npm run tauri:build
 ```
 
-Package a Windows portable zip after the release executable exists:
+Đóng gói bản portable Windows sau khi đã có release executable:
 
 ```bash
 npm run package:portable
 ```
 
-## Portable Build
+## Portable build
 
-Use the portable build for quick Windows testing when you want to send one zip to someone and let them double-click the app without installing it. The script copies `src-tauri/target/release/claude-cache-warden.exe` to `dist-portable/ClaudeCacheWarden-portable/Claude Cache Warden (Portable).exe`, adds a bilingual `README-portable.txt`, and creates `dist-portable/ClaudeCacheWarden-portable-v0.1.0.zip`.
+Bản portable phù hợp khi cần gửi nhanh cho người khác test trên Windows mà không muốn bắt họ cài đặt app.
 
-The portable `.exe` does not install Microsoft Edge WebView2 Runtime. Most Windows 11 machines already have it, but older Windows 10 machines may need the runtime from Microsoft. The portable README also notes that unsigned builds may trigger Windows SmartScreen and explains the "More info" -> "Run anyway" path.
+Script `npm run package:portable` sẽ:
 
-Use NSIS/MSI installers from `npm run tauri:build` for the main distribution path. Installers integrate with Windows installation flows, Start Menu/Programs, and WebView2 bootstrap behavior. Use `npm run package:portable` for fast sharing and informal testing.
+- lấy `src-tauri/target/release/claude-cache-warden.exe`
+- copy sang `dist-portable/ClaudeCacheWarden-portable/Claude Cache Warden (Portable).exe`
+- thêm `README-portable.txt` song ngữ
+- tạo file zip `dist-portable/ClaudeCacheWarden-portable-v0.1.0.zip`
 
-## Release Size Check
+Lưu ý:
 
-The publish size is the final installer size, not the development workspace size. `node_modules` and Rust build caches such as `src-tauri/target/debug` can be several GB during development and are ignored by git.
+- Bản portable không tự cài Microsoft Edge WebView2 Runtime.
+- Nhiều máy Windows 11 đã có sẵn WebView2, nhưng một số máy Windows 10 cũ có thể cần cài thêm.
+- Vì chưa code signing, Windows SmartScreen có thể cảnh báo ở lần chạy đầu.
 
-Build the release bundles:
+Dùng installer NSIS/MSI tạo bởi `npm run tauri:build` cho luồng phân phối chính thức. Dùng `npm run package:portable` cho việc gửi nhanh và test không chính thức.
+
+## Kiểm tra kích thước release
+
+Kích thước quan trọng khi publish là kích thước installer cuối cùng, không phải kích thước toàn bộ thư mục dev.
+
+`node_modules` và Rust build cache như `src-tauri/target/debug` có thể rất lớn trong quá trình phát triển, nhưng không phải file người dùng cuối tải về.
+
+Build release:
 
 ```bash
 npm run tauri:build
 ```
 
-Then check the generated installer:
+Sau đó kiểm tra các file sinh ra:
 
 - Windows NSIS: `src-tauri/target/release/bundle/nsis/*.exe`
 - Windows MSI: `src-tauri/target/release/bundle/msi/*.msi`
 - macOS DMG: `src-tauri/target/release/bundle/dmg/*.dmg`
 
-Those files are the sizes that matter for publishing. Tauri uses the OS WebView runtime instead of bundling a browser engine, so the final installers are normally much smaller than the full development folder.
+Đây mới là kích thước cần quan tâm khi publish. Tauri dùng WebView của hệ điều hành thay vì đóng gói sẵn browser engine, nên installer thường nhỏ hơn rất nhiều so với thư mục dev.
 
-The current icon set was generated with `npm run tauri -- icon action/NORMAL_icon_1024.png`. That source is a temporary 1024x1024 upscale of the pixel-art frog asset at `action/NORMAL.png` and can be replaced later with a higher-quality square source image.
+## Icon
+
+Bộ icon hiện tại được tạo bằng:
+
+```bash
+npm run tauri -- icon action/NORMAL_icon_1024.png
+```
+
+Nguồn icon này là bản upscale 1024x1024 tạm thời của sprite ếch tại `action/NORMAL.png`. Có thể thay sau bằng một ảnh vuông chất lượng cao hơn.
 
 ## Validation
 
@@ -172,4 +224,4 @@ cargo fmt
 cargo check
 ```
 
-This workspace currently needs Rust/Cargo installed before the Tauri backend can be compiled.
+Nếu máy hiện tại chưa có Rust/Cargo trong `PATH`, cần cài hoặc thêm đúng toolchain trước khi build Tauri backend.
