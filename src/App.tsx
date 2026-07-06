@@ -26,7 +26,7 @@ function flattenNodes(nodes: CacheNode[]): CacheNode[] {
 
 function defaultSafeSelection(scan: ScanResult | null): Set<string> {
   if (!scan) return new Set();
-  return new Set(flattenNodes(scan.roots).filter((node) => node.safety === "Safe" && node.exists).map((node) => node.path));
+  return new Set(flattenNodes(scan.roots).filter((node) => node.default_cleanup && node.exists).map((node) => node.path));
 }
 
 function containsNodePath(parent: CacheNode, path: string): boolean {

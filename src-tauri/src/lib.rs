@@ -2,8 +2,7 @@ use chrono::{DateTime, Local, NaiveTime};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
@@ -21,7 +20,7 @@ const DEFAULT_GROWTH_ALERT_GB_PER_HOUR: f64 = 2.0;
 const SCHEDULER_TICK_SECONDS: u64 = 60;
 const SCHEDULER_SCAN_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 enum SafetyLevel {
     Safe,
     Caution,
@@ -37,6 +36,7 @@ struct CacheNode {
     dir_count: u64,
     exists: bool,
     safety: SafetyLevel,
+    default_cleanup: bool,
     description: String,
     children: Vec<CacheNode>,
 }
@@ -179,10 +179,11 @@ impl Default for PersistedState {
 
 impl AppState {
     fn load(app: tauri::AppHandle) -> Self {
-        let base_dir = app
-            .path()
-            .app_config_dir()
-            .unwrap_or_else(|_| dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("ClaudeCacheWarden"));
+        let base_dir = app.path().app_config_dir().unwrap_or_else(|_| {
+            dirs::config_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("ClaudeCacheWarden")
+        });
         let _ = fs::create_dir_all(&base_dir);
         let storage_path = base_dir.join("state.json");
         let persisted = fs::read_to_string(&storage_path)
@@ -198,14 +199,20 @@ impl AppState {
     }
 
     fn save(&self) -> Result<(), String> {
-        let state = self.persisted.lock().map_err(|_| "State lock failed".to_string())?;
+        let state = self
+            .persisted
+            .lock()
+            .map_err(|_| "State lock failed".to_string())?;
         let value = serde_json::to_string_pretty(&*state).map_err(|error| error.to_string())?;
         fs::write(&self.storage_path, value).map_err(|error| error.to_string())
     }
 
     fn record_sample(&self, total_bytes: u64) -> Result<(), String> {
         {
-            let mut state = self.persisted.lock().map_err(|_| "State lock failed".to_string())?;
+            let mut state = self
+                .persisted
+                .lock()
+                .map_err(|_| "State lock failed".to_string())?;
             state.samples.push_back(SizeSample {
                 captured_at: Local::now(),
                 total_bytes,
@@ -219,7 +226,10 @@ impl AppState {
 
     fn push_history(&self, entry: CleanHistoryEntry) -> Result<(), String> {
         {
-            let mut state = self.persisted.lock().map_err(|_| "State lock failed".to_string())?;
+            let mut state = self
+                .persisted
+                .lock()
+                .map_err(|_| "State lock failed".to_string())?;
             state.history.insert(0, entry);
             state.history.truncate(100);
         }
@@ -277,9 +287,15 @@ fn scan_cache(state: State<'_, Arc<AppState>>) -> Result<ScanResult, String> {
 }
 
 #[tauri::command]
-fn clean_cache(state: State<'_, Arc<AppState>>, request: CleanRequest) -> Result<CleanResult, String> {
+fn clean_cache(
+    state: State<'_, Arc<AppState>>,
+    request: CleanRequest,
+) -> Result<CleanResult, String> {
     if is_claude_running() && !request.allow_when_running {
-        return Err("Claude Desktop is running. Close Claude or allow cleanup while it is running.".to_string());
+        return Err(
+            "Claude Desktop is running. Close Claude or allow cleanup while it is running."
+                .to_string(),
+        );
     }
 
     let result = perform_clean(&request.paths)?;
@@ -296,7 +312,10 @@ fn clean_cache(state: State<'_, Arc<AppState>>, request: CleanRequest) -> Result
 
 #[tauri::command]
 fn get_scheduler_settings(state: State<'_, Arc<AppState>>) -> Result<SchedulerSettings, String> {
-    let state = state.persisted.lock().map_err(|_| "State lock failed".to_string())?;
+    let state = state
+        .persisted
+        .lock()
+        .map_err(|_| "State lock failed".to_string())?;
     Ok(state.settings.clone())
 }
 
@@ -306,30 +325,46 @@ fn save_scheduler_settings(
     settings: SchedulerSettings,
 ) -> Result<SchedulerSettings, String> {
     {
-        let mut persisted = state.persisted.lock().map_err(|_| "State lock failed".to_string())?;
+        let mut persisted = state
+            .persisted
+            .lock()
+            .map_err(|_| "State lock failed".to_string())?;
         persisted.settings = normalize_settings(settings);
     }
     state.save()?;
-    let persisted = state.persisted.lock().map_err(|_| "State lock failed".to_string())?;
+    let persisted = state
+        .persisted
+        .lock()
+        .map_err(|_| "State lock failed".to_string())?;
     Ok(persisted.settings.clone())
 }
 
 #[tauri::command]
 fn get_clean_history(state: State<'_, Arc<AppState>>) -> Result<Vec<CleanHistoryEntry>, String> {
-    let state = state.persisted.lock().map_err(|_| "State lock failed".to_string())?;
+    let state = state
+        .persisted
+        .lock()
+        .map_err(|_| "State lock failed".to_string())?;
     Ok(state.history.clone())
 }
 
 #[tauri::command]
 fn evaluate_growth_alert(state: State<'_, Arc<AppState>>) -> Result<GrowthAlert, String> {
-    let state = state.persisted.lock().map_err(|_| "State lock failed".to_string())?;
+    let state = state
+        .persisted
+        .lock()
+        .map_err(|_| "State lock failed".to_string())?;
     Ok(calculate_growth_alert(&state))
 }
 
 #[tauri::command]
 fn export_report(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<String, String> {
     let scan = perform_scan()?;
-    let persisted = state.persisted.lock().map_err(|_| "State lock failed".to_string())?.clone();
+    let persisted = state
+        .persisted
+        .lock()
+        .map_err(|_| "State lock failed".to_string())?
+        .clone();
     let report = serde_json::json!({
         "generated_at": Local::now().to_rfc3339(),
         "scan": scan,
@@ -342,9 +377,15 @@ fn export_report(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Resu
         .path()
         .document_dir()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()));
-    let path = dir.join(format!("claude-cache-report-{}.json", Local::now().format("%Y%m%d-%H%M%S")));
-    fs::write(&path, serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())?;
+    let path = dir.join(format!(
+        "claude-cache-report-{}.json",
+        Local::now().format("%Y%m%d-%H%M%S")
+    ));
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -389,7 +430,10 @@ fn should_scheduler_run(state: &Arc<AppState>) -> Result<Option<String>, String>
     let now = Local::now();
     let today = now.format("%Y-%m-%d").to_string();
     let settings = {
-        let persisted = state.persisted.lock().map_err(|_| "State lock failed".to_string())?;
+        let persisted = state
+            .persisted
+            .lock()
+            .map_err(|_| "State lock failed".to_string())?;
         let settings = persisted.settings.clone();
         if !settings.enabled {
             // When automation is disabled, avoid all recursive disk scans.
@@ -403,13 +447,19 @@ fn should_scheduler_run(state: &Arc<AppState>) -> Result<Option<String>, String>
             .unwrap_or_else(|_| NaiveTime::from_hms_opt(2, 0, 0).unwrap());
         let now_time = now.time();
         let should_run_schedule = {
-            let persisted = state.persisted.lock().map_err(|_| "State lock failed".to_string())?;
+            let persisted = state
+                .persisted
+                .lock()
+                .map_err(|_| "State lock failed".to_string())?;
             now_time.hour() == time.hour()
                 && now_time.minute() == time.minute()
                 && persisted.last_schedule_day.as_deref() != Some(&today)
         };
         if should_run_schedule {
-            let mut persisted = state.persisted.lock().map_err(|_| "State lock failed".to_string())?;
+            let mut persisted = state
+                .persisted
+                .lock()
+                .map_err(|_| "State lock failed".to_string())?;
             persisted.last_schedule_day = Some(today);
             drop(persisted);
             state.save()?;
@@ -436,7 +486,9 @@ fn should_scheduler_run(state: &Arc<AppState>) -> Result<Option<String>, String>
     Ok(None)
 }
 
-fn next_scheduler_scan_signature(state: &Arc<AppState>) -> Result<Option<Vec<RootSignature>>, String> {
+fn next_scheduler_scan_signature(
+    state: &Arc<AppState>,
+) -> Result<Option<Vec<RootSignature>>, String> {
     let root_signature = root_modification_signature();
     let cache = state
         .scheduler_scan_cache
@@ -483,8 +535,14 @@ fn perform_scan() -> Result<ScanResult, String> {
     let mut scanned_roots = Vec::new();
     for root in roots {
         scanned_roots.push(
-            scan_path(&root.path, root.label, root.safety, root.description)
-                .map_err(|error| error.to_string())?,
+            scan_path(
+                &root.path,
+                root.label,
+                root.safety,
+                root.default_cleanup,
+                root.description,
+            )
+            .map_err(|error| error.to_string())?,
         );
     }
 
@@ -514,7 +572,10 @@ fn perform_clean(paths: &[String]) -> Result<CleanResult, String> {
         }
         if !is_allowed_cleanup_target(&path) {
             skipped_paths.push(raw.clone());
-            errors.push(format!("Refused to clean outside known Claude cache roots: {}", raw));
+            errors.push(format!(
+                "Refused to clean outside known Claude cache roots: {}",
+                raw
+            ));
             continue;
         }
         if classify_path(&path).0 == SafetyLevel::NotRecommended {
@@ -547,7 +608,13 @@ fn perform_clean(paths: &[String]) -> Result<CleanResult, String> {
     })
 }
 
-fn scan_path(path: &Path, label: String, safety: SafetyLevel, description: String) -> io::Result<CacheNode> {
+fn scan_path(
+    path: &Path,
+    label: String,
+    safety: SafetyLevel,
+    default_cleanup: bool,
+    description: String,
+) -> io::Result<CacheNode> {
     if !path.exists() {
         return Ok(CacheNode {
             label,
@@ -557,6 +624,7 @@ fn scan_path(path: &Path, label: String, safety: SafetyLevel, description: Strin
             dir_count: 0,
             exists: false,
             safety,
+            default_cleanup,
             description,
             children: Vec::new(),
         });
@@ -572,6 +640,7 @@ fn scan_path(path: &Path, label: String, safety: SafetyLevel, description: Strin
             dir_count: 0,
             exists: true,
             safety,
+            default_cleanup,
             description,
             children: Vec::new(),
         });
@@ -597,8 +666,15 @@ fn scan_path(path: &Path, label: String, safety: SafetyLevel, description: Strin
         }
         if child_meta.is_dir() {
             let (child_safety, child_description) = classify_path(&child_path);
+            let child_default_cleanup = default_cleanup && child_safety == SafetyLevel::Safe;
             let child_label = display_label(&child_path);
-            let child = scan_path(&child_path, child_label, child_safety, child_description)?;
+            let child = scan_path(
+                &child_path,
+                child_label,
+                child_safety,
+                child_default_cleanup,
+                child_description,
+            )?;
             size_bytes += child.size_bytes;
             file_count += child.file_count;
             dir_count += child.dir_count + 1;
@@ -618,6 +694,7 @@ fn scan_path(path: &Path, label: String, safety: SafetyLevel, description: Strin
         dir_count,
         exists: true,
         safety,
+        default_cleanup,
         description,
         children,
     })
@@ -632,11 +709,26 @@ fn claude_roots() -> Vec<KnownRoot> {
                         home.join("Library/Application Support/Claude/vm_bundles"),
                         "Claude workspace bundles",
                     ),
-                    root(home.join("Library/Application Support/Claude/vm_bundles/warm"), "Warm VM bundles"),
-                    root(home.join("Library/Application Support/Claude/Cache"), "Renderer cache"),
-                    root(home.join("Library/Application Support/Claude/Code Cache"), "Code cache"),
-                    root(home.join("Library/Application Support/Claude/claude-code-vm"), "Claude Code VM cache"),
-                    root(home.join("Library/Application Support/Claude/claude-code"), "Claude Code cache"),
+                    root(
+                        home.join("Library/Application Support/Claude/vm_bundles/warm"),
+                        "Warm VM bundles",
+                    ),
+                    root(
+                        home.join("Library/Application Support/Claude/Cache"),
+                        "Renderer cache",
+                    ),
+                    root(
+                        home.join("Library/Application Support/Claude/Code Cache"),
+                        "Code cache",
+                    ),
+                    root(
+                        home.join("Library/Application Support/Claude/claude-code-vm"),
+                        "Claude Code VM cache",
+                    ),
+                    root(
+                        home.join("Library/Application Support/Claude/claude-code"),
+                        "Claude Code cache",
+                    ),
                     root(home.join("Library/Caches/Claude"), "Claude system cache"),
                 ]
             })
@@ -650,7 +742,17 @@ fn claude_roots() -> Vec<KnownRoot> {
                 ));
             }
             if let Ok(local) = std::env::var("LOCALAPPDATA") {
-                roots.push(root(PathBuf::from(local).join("Claude"), "Claude local cache"));
+                let local_path = PathBuf::from(local);
+                roots.push(root(local_path.join("Claude"), "Claude local cache"));
+                roots.push(root(
+                    local_path.join("Claude-3p"),
+                    "Claude (3p channel) data",
+                ));
+                roots.push(root(
+                    local_path.join("Temp").join("claude"),
+                    "Claude temp files",
+                ));
+                roots.extend(windows_store_package_roots(&local_path));
             }
             roots
         }
@@ -662,7 +764,9 @@ fn root_modification_signature() -> Vec<RootSignature> {
     claude_roots()
         .into_iter()
         .map(|root| RootSignature {
-            modified: fs::metadata(&root.path).and_then(|metadata| metadata.modified()).ok(),
+            modified: fs::metadata(&root.path)
+                .and_then(|metadata| metadata.modified())
+                .ok(),
             path: root.path,
         })
         .collect()
@@ -673,25 +777,62 @@ fn windows_root_debug_warnings(roots: &[KnownRoot]) -> Vec<String> {
         return Vec::new();
     }
 
-    roots
-        .iter()
-        .map(|root| {
-            let child_names = direct_child_dir_names(&root.path);
-            let message = match child_names {
-                Ok(names) if names.is_empty() => {
-                    format!("Debug: {} has no direct child directories.", root.path.display())
+    let mut warnings = Vec::new();
+    for root in roots {
+        let child_names = direct_child_dir_names(&root.path);
+        let message = match child_names {
+            Ok(names) if names.is_empty() => {
+                format!(
+                    "Debug: {} has no direct child directories.",
+                    root.path.display()
+                )
+            }
+            Ok(names) => format!(
+                "Debug: {} child directories: {}",
+                root.path.display(),
+                names.join(", ")
+            ),
+            Err(error) => format!(
+                "Debug: {} could not be read: {}",
+                root.path.display(),
+                error
+            ),
+        };
+        eprintln!("{message}");
+        warnings.push(message);
+
+        if is_path_leaf(&root.path, "LocalCache") && root.path.exists() {
+            let message = match direct_child_dir_sizes(&root.path) {
+                Ok(sizes) if sizes.is_empty() => {
+                    format!(
+                        "Debug: {} has no child directory sizes to report.",
+                        root.path.display()
+                    )
                 }
-                Ok(names) => format!(
-                    "Debug: {} child directories: {}",
+                Ok(sizes) => {
+                    let formatted = sizes
+                        .into_iter()
+                        .map(|(name, bytes)| format!("{}={}", name, format_debug_bytes(bytes)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "Debug: {} child directory sizes: {}",
+                        root.path.display(),
+                        formatted
+                    )
+                }
+                Err(error) => format!(
+                    "Debug: {} child directory sizes could not be read: {}",
                     root.path.display(),
-                    names.join(", ")
+                    error
                 ),
-                Err(error) => format!("Debug: {} could not be read: {}", root.path.display(), error),
             };
             eprintln!("{message}");
-            message
-        })
-        .collect()
+            warnings.push(message);
+        }
+    }
+
+    warnings
 }
 
 fn windows_root_debug_enabled() -> bool {
@@ -714,26 +855,152 @@ fn direct_child_dir_names(path: &Path) -> io::Result<Vec<String>> {
     Ok(names)
 }
 
+fn direct_child_dir_sizes(path: &Path) -> io::Result<Vec<(String, u64)>> {
+    let mut sizes = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let size = dir_size(&entry.path()).unwrap_or(0);
+            sizes.push((name, size));
+        }
+    }
+    sizes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok(sizes)
+}
+
 fn root(path: PathBuf, label: &str) -> KnownRoot {
     let (safety, description) = classify_path(&path);
+    known_root(
+        path,
+        label,
+        safety,
+        safety == SafetyLevel::Safe,
+        description,
+    )
+}
+
+fn review_root(path: PathBuf, label: &str) -> KnownRoot {
+    let (safety, description) = classify_path(&path);
+    known_root(path, label, safety, false, description)
+}
+
+fn known_root(
+    path: PathBuf,
+    label: &str,
+    safety: SafetyLevel,
+    default_cleanup: bool,
+    description: String,
+) -> KnownRoot {
     KnownRoot {
         path,
         label: label.to_string(),
         safety,
+        default_cleanup,
         description,
     }
+}
+
+fn windows_store_package_roots(local_path: &Path) -> Vec<KnownRoot> {
+    let packages_path = local_path.join("Packages");
+    let Ok(entries) = fs::read_dir(packages_path) else {
+        return Vec::new();
+    };
+
+    let mut package_roots = entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|file_type| file_type.is_dir())
+                .unwrap_or(false)
+        })
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with("claude_")
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+
+    package_roots.sort();
+    package_roots
+        .into_iter()
+        .flat_map(|package_root| windows_store_package_branch_roots(&package_root))
+        .collect()
+}
+
+fn windows_store_package_branch_roots(package_root: &Path) -> Vec<KnownRoot> {
+    vec![
+        review_root(
+            package_root.join("LocalCache"),
+            "Claude Store package cache",
+        ),
+        review_root(
+            package_root.join("TempState"),
+            "Claude Store package temp state",
+        ),
+        review_root(
+            package_root.join("LocalState"),
+            "Claude Store package local state",
+        ),
+        review_root(
+            package_root.join("RoamingState"),
+            "Claude Store package roaming state",
+        ),
+        review_root(
+            package_root.join("Settings"),
+            "Claude Store package settings",
+        ),
+        review_root(
+            package_root.join("AC"),
+            "Claude Store package app container",
+        ),
+        review_root(
+            package_root.join("SystemAppData"),
+            "Claude Store package system app data",
+        ),
+    ]
 }
 
 struct KnownRoot {
     path: PathBuf,
     label: String,
     safety: SafetyLevel,
+    default_cleanup: bool,
     description: String,
 }
 
 fn classify_path(path: &Path) -> (SafetyLevel, String) {
     let normalized = path.to_string_lossy().to_ascii_lowercase();
-    if normalized.contains("vm_bundles\\warm")
+    if is_path_leaf(path, "LocalCache") {
+        (
+            SafetyLevel::Safe,
+            "Claude Store package cache. Review debug output before enabling automatic cleanup."
+                .to_string(),
+        )
+    } else if is_path_leaf(path, "TempState") {
+        (
+            SafetyLevel::Safe,
+            "Claude Store package temporary state. Review debug output before enabling automatic cleanup.".to_string(),
+        )
+    } else if is_path_leaf(path, "LocalState")
+        || is_path_leaf(path, "RoamingState")
+        || is_path_leaf(path, "Settings")
+    {
+        (
+            SafetyLevel::NotRecommended,
+            "May contain Store app state, settings, or session data.".to_string(),
+        )
+    } else if is_path_leaf(path, "AC") || is_path_leaf(path, "SystemAppData") {
+        (
+            SafetyLevel::Caution,
+            "Windows app-container data. Review this location before deleting.".to_string(),
+        )
+    } else if normalized.contains("vm_bundles\\warm")
         || normalized.contains("vm_bundles/warm")
         || normalized.ends_with("\\cache")
         || normalized.ends_with("/cache")
@@ -757,7 +1024,8 @@ fn classify_path(path: &Path) -> (SafetyLevel, String) {
     } else {
         (
             SafetyLevel::Caution,
-            "Review this location before deleting because it may be tied to active workspaces.".to_string(),
+            "Review this location before deleting because it may be tied to active workspaces."
+                .to_string(),
         )
     }
 }
@@ -765,7 +1033,7 @@ fn classify_path(path: &Path) -> (SafetyLevel, String) {
 fn safe_cleanup_paths() -> Vec<String> {
     claude_roots()
         .into_iter()
-        .filter(|root| root.safety == SafetyLevel::Safe)
+        .filter(|root| root.default_cleanup)
         .map(|root| root.path.to_string_lossy().to_string())
         .collect()
 }
@@ -786,7 +1054,10 @@ fn is_allowed_cleanup_target(path: &Path) -> bool {
 fn remove_path_contents_or_file(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
-        return Err(io::Error::new(io::ErrorKind::Other, "symlink cleanup is not allowed"));
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "symlink cleanup is not allowed",
+        ));
     }
     if metadata.is_file() {
         return fs::remove_file(path);
@@ -831,20 +1102,44 @@ fn display_label(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
+fn is_path_leaf(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .map(|value| value.to_string_lossy().eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
+fn format_debug_bytes(bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else {
+        format!("{} bytes", bytes)
+    }
+}
+
 fn is_claude_running() -> bool {
     let mut system = System::new_all();
     system.refresh_processes();
     let current_pid = std::process::id().to_string();
-    system
-        .processes()
-        .iter()
-        .any(|(pid, process)| {
-            is_claude_desktop_process_name(process.name(), &pid.to_string(), &current_pid)
-        })
+    system.processes().iter().any(|(pid, process)| {
+        is_claude_desktop_process_name(process.name(), &pid.to_string(), &current_pid)
+    })
 }
 
-fn is_claude_desktop_process_name(process_name: &str, process_pid: &str, current_pid: &str) -> bool {
-    is_claude_desktop_process_name_for_os(process_name, process_pid, current_pid, std::env::consts::OS)
+fn is_claude_desktop_process_name(
+    process_name: &str,
+    process_pid: &str,
+    current_pid: &str,
+) -> bool {
+    is_claude_desktop_process_name_for_os(
+        process_name,
+        process_pid,
+        current_pid,
+        std::env::consts::OS,
+    )
 }
 
 fn is_claude_desktop_process_name_for_os(
@@ -918,7 +1213,9 @@ fn calculate_growth_alert(state: &PersistedState) -> GrowthAlert {
 }
 
 fn rate_between(previous: &SizeSample, latest: &SizeSample) -> f64 {
-    let seconds = (latest.captured_at - previous.captured_at).num_seconds().max(1) as f64;
+    let seconds = (latest.captured_at - previous.captured_at)
+        .num_seconds()
+        .max(1) as f64;
     let delta = latest.total_bytes as f64 - previous.total_bytes as f64;
     bytes_to_gb(delta.max(0.0) as u64) / (seconds / 3600.0)
 }
@@ -961,13 +1258,22 @@ mod tests {
 
     #[test]
     fn claude_process_match_excludes_current_pid() {
-        assert!(!is_claude_desktop_process_name_for_os("claude", "42", "42", "windows"));
+        assert!(!is_claude_desktop_process_name_for_os(
+            "claude", "42", "42", "windows"
+        ));
     }
 
     #[test]
     fn claude_process_match_uses_exact_windows_name() {
-        assert!(is_claude_desktop_process_name_for_os("claude", "100", "42", "windows"));
-        assert!(is_claude_desktop_process_name_for_os("Claude.exe", "100", "42", "windows"));
+        assert!(is_claude_desktop_process_name_for_os(
+            "claude", "100", "42", "windows"
+        ));
+        assert!(is_claude_desktop_process_name_for_os(
+            "Claude.exe",
+            "100",
+            "42",
+            "windows"
+        ));
         assert!(!is_claude_desktop_process_name_for_os(
             "Claude Cache Warden",
             "100",
@@ -984,13 +1290,65 @@ mod tests {
 
     #[test]
     fn claude_process_match_uses_exact_macos_name() {
-        assert!(is_claude_desktop_process_name_for_os("Claude", "100", "42", "macos"));
+        assert!(is_claude_desktop_process_name_for_os(
+            "Claude", "100", "42", "macos"
+        ));
         assert!(!is_claude_desktop_process_name_for_os(
             "Claude Cache Warden",
             "100",
             "42",
             "macos"
         ));
-        assert!(!is_claude_desktop_process_name_for_os("claude", "100", "42", "macos"));
+        assert!(!is_claude_desktop_process_name_for_os(
+            "claude", "100", "42", "macos"
+        ));
+    }
+
+    #[test]
+    fn store_package_roots_are_not_default_cleanup_targets() {
+        let package_root =
+            PathBuf::from(r"C:\Users\Admin\AppData\Local\Packages\Claude_pzs8sxrjxfjjc");
+        let roots = windows_store_package_branch_roots(&package_root);
+
+        assert!(roots.iter().all(|root| !root.default_cleanup));
+        assert_eq!(
+            roots
+                .iter()
+                .find(|root| is_path_leaf(&root.path, "LocalCache"))
+                .map(|root| root.safety),
+            Some(SafetyLevel::Safe)
+        );
+        assert_eq!(
+            roots
+                .iter()
+                .find(|root| is_path_leaf(&root.path, "TempState"))
+                .map(|root| root.safety),
+            Some(SafetyLevel::Safe)
+        );
+        assert_eq!(
+            roots
+                .iter()
+                .find(|root| is_path_leaf(&root.path, "LocalState"))
+                .map(|root| root.safety),
+            Some(SafetyLevel::NotRecommended)
+        );
+        assert_eq!(
+            roots
+                .iter()
+                .find(|root| is_path_leaf(&root.path, "SystemAppData"))
+                .map(|root| root.safety),
+            Some(SafetyLevel::Caution)
+        );
+    }
+
+    #[test]
+    fn conventional_safe_roots_remain_default_cleanup_targets() {
+        let root = root(
+            PathBuf::from("/Users/example/Library/Application Support/Claude/Cache"),
+            "Renderer cache",
+        );
+
+        assert_eq!(root.safety, SafetyLevel::Safe);
+        assert!(root.default_cleanup);
     }
 }

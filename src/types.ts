@@ -8,6 +8,7 @@ export interface CacheNode {
   dir_count: number;
   exists: boolean;
   safety: SafetyLevel;
+  default_cleanup: boolean;
   description: string;
   children: CacheNode[];
 }

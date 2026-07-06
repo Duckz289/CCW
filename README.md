@@ -78,14 +78,14 @@ The app detects the OS at runtime and resolves the matching user-profile paths.
 
 Cleanup is blocked unless the selected path is inside a known Claude cache root.
 
-Default cleanup selects only locations classified as `Safe`, such as renderer cache, code cache, and warm VM bundle cache. Top-level Claude folders, config-like folders, and session-like folders are classified as `NotRecommended` and are refused by the backend cleanup command.
+Default cleanup selects only locations explicitly marked for default cleanup, such as verified renderer cache, code cache, and warm VM bundle cache. Some newly observed cache-like locations can still be labeled `Safe` while staying out of the default cleanup set until debug logs confirm their contents. Top-level Claude folders, config-like folders, and session-like folders are classified as `NotRecommended` and are refused by the backend cleanup command.
 
 If Claude Desktop is running, cleanup is blocked unless the user explicitly enables cleanup while Claude is running.
 
 ## Known Limitations
 
-- Windows safe-folder classification still depends on verifying the real child folder names under `%APPDATA%\Claude\` and `%LOCALAPPDATA%\Claude\` on machines where those roots exist. In debug builds, or when `CCW_DEBUG_WINDOWS_ROOTS=1` is set, scans log and surface the direct child directory names for those roots so the classifier can be updated from real data instead of guessed names.
-- On this Windows test machine, Claude Desktop processes were observed as exact process name `claude` with executable path ending in `Claude.exe`, but `%APPDATA%\Claude\` and `%LOCALAPPDATA%\Claude\` did not exist. The app therefore keeps the current conservative Windows `Safe` rules until a scan from a machine with populated Claude roots confirms additional folder names.
+- Windows safe-folder classification still depends on verifying real child folder names under both conventional Claude roots and Microsoft Store package roots. In debug builds, or when `CCW_DEBUG_WINDOWS_ROOTS=1` is set, scans log direct child directory names and include one deeper size report for Store `LocalCache` roots so the classifier can be updated from real data instead of guessed names.
+- On this Windows test machine, Claude Desktop processes were observed as exact process name `claude` with executable path ending in `Claude.exe`, while `%APPDATA%\Claude\` and `%LOCALAPPDATA%\Claude\` did not exist. The app now detects the Store package root, but keeps newly observed Store cache locations out of automatic/default cleanup until the logged contents are reviewed.
 - Automatic cleanup checks the scheduler flag every minute, but full recursive scans are throttled to about every 10 minutes unless the root directory mtimes change. Manual scans still run immediately.
 
 ## Development
