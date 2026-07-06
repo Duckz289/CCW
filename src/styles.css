@@ -1,0 +1,116 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: #f3ead7;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+@layer components {
+  .nav-button {
+    @apply flex h-11 items-center justify-center gap-2 rounded-full px-3 text-left text-sm font-black text-muted transition hover:bg-panel2 hover:text-text md:justify-start;
+  }
+
+  .nav-button-active {
+    @apply bg-accent text-panel;
+  }
+
+  .nav-mark {
+    @apply grid h-7 min-w-10 place-items-center bg-panel2 px-2 text-[11px] font-black uppercase tracking-wide text-accent;
+  }
+
+  .primary-button {
+    @apply inline-flex h-11 items-center justify-center gap-2 whitespace-nowrap rounded-full bg-accent px-5 text-sm font-black text-panel transition hover:bg-text active:translate-y-px;
+  }
+
+  .secondary-button {
+    @apply inline-flex h-11 items-center justify-center gap-2 whitespace-nowrap rounded-full bg-panel2 px-5 text-sm font-black text-text transition hover:bg-line/40 active:translate-y-px;
+  }
+
+  .language-switch {
+    @apply inline-flex h-11 overflow-hidden rounded-full bg-ink p-1;
+  }
+
+  .language-button {
+    @apply min-w-11 rounded-full px-3 text-sm font-black text-muted transition hover:text-text;
+  }
+
+  .language-button-active {
+    @apply bg-accent text-panel;
+  }
+
+  .icon-button {
+    @apply grid h-10 w-10 place-items-center rounded-full bg-panel2 text-text transition hover:bg-line/40 active:translate-y-px;
+  }
+
+  .field-label {
+    @apply grid gap-2 text-sm font-semibold text-muted;
+  }
+
+  .field-input {
+    @apply h-11 rounded-md bg-ink px-3 text-text outline-none ring-1 ring-line/70 transition focus:ring-2 focus:ring-accent;
+  }
+
+  .surface {
+    @apply rounded-[24px] bg-panel shadow-soft;
+  }
+
+  .surface-pond {
+    @apply bg-panel2;
+  }
+
+  .metric-tile {
+    @apply bg-ink px-4 py-3;
+  }
+
+  .flat-control {
+    @apply flex items-center justify-between gap-4 bg-ink px-4 py-3;
+  }
+
+  .path-row {
+    @apply flex min-w-0 items-start gap-3 bg-ink/75 px-3 py-3 transition hover:bg-panel2/70;
+  }
+
+  .swamp-alert {
+    @apply flex items-start gap-3 rounded-[18px] px-4 py-3 shadow-soft;
+  }
+
+  .mascot-card {
+    @apply rounded-[28px] bg-panel2 p-5 shadow-soft;
+  }
+
+  .mascot-card-alert {
+    @apply bg-danger/10;
+  }
+
+  .mascot-glade {
+    @apply grid min-h-[310px] place-items-center rounded-[22px] bg-ink;
+    background-image:
+      linear-gradient(180deg, rgb(223 232 195 / 0.55), rgb(243 234 215 / 0)),
+      repeating-linear-gradient(90deg, rgb(47 107 63 / 0.12) 0 2px, transparent 2px 18px);
+  }
+
+  .mascot-sprite {
+    width: min(78vw, 330px);
+    height: auto;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    transform: translateY(8px);
+  }
+}
