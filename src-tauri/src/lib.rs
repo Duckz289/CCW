@@ -15,6 +15,12 @@ use tauri::{
     Emitter, Manager, State,
 };
 
+#[derive(Debug, Default)]
+struct RemoveStats {
+    removed_entries: u64,
+    errors: Vec<String>,
+}
+
 const MAX_SAMPLES: usize = 96;
 const DEFAULT_GROWTH_ALERT_GB_PER_HOUR: f64 = 2.0;
 const SCHEDULER_TICK_SECONDS: u64 = 60;
@@ -25,6 +31,14 @@ enum SafetyLevel {
     Safe,
     Caution,
     NotRecommended,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ClaudeActivity {
+    NotDetected,
+    Background,
+    Window,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +62,7 @@ struct ScanResult {
     total_bytes: u64,
     roots: Vec<CacheNode>,
     claude_running: bool,
+    claude_activity: ClaudeActivity,
     warnings: Vec<String>,
 }
 
@@ -145,7 +160,9 @@ pub fn run() {
             save_scheduler_settings,
             get_clean_history,
             evaluate_growth_alert,
-            export_report
+            export_report,
+            get_claude_running,
+            get_claude_activity
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Claude Cache Warden");
@@ -242,8 +259,14 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let scan_i = MenuItem::with_id(app, "scan", "Scan", true, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_i, &scan_i, &quit_i])?;
+    let tray_icon = app.default_window_icon().cloned();
 
-    TrayIconBuilder::new()
+    let mut builder = TrayIconBuilder::new();
+    if let Some(icon) = tray_icon {
+        builder = builder.icon(icon);
+    }
+
+    builder
         .tooltip("Claude Cache Warden")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -291,11 +314,9 @@ fn clean_cache(
     state: State<'_, Arc<AppState>>,
     request: CleanRequest,
 ) -> Result<CleanResult, String> {
-    if is_claude_running() && !request.allow_when_running {
-        return Err(
-            "Claude Desktop is running. Close Claude or allow cleanup while it is running."
-                .to_string(),
-        );
+    let activity = claude_activity();
+    if claude_activity_blocks_cleanup(activity) && !request.allow_when_running {
+        return Err(claude_cleanup_block_message(activity));
     }
 
     let result = perform_clean(&request.paths)?;
@@ -389,6 +410,16 @@ fn export_report(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Resu
     Ok(path.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+fn get_claude_running() -> bool {
+    is_claude_running()
+}
+
+#[tauri::command]
+fn get_claude_activity() -> ClaudeActivity {
+    claude_activity()
+}
+
 fn start_scheduler(app: tauri::AppHandle) {
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(SCHEDULER_TICK_SECONDS));
@@ -407,7 +438,9 @@ fn start_scheduler(app: tauri::AppHandle) {
                 Ok(value) => value.settings.clone(),
                 Err(_) => continue,
             };
-            if is_claude_running() && !settings.clean_when_claude_running {
+            if claude_activity_blocks_cleanup(claude_activity())
+                && !settings.clean_when_claude_running
+            {
                 continue;
             }
             let paths = safe_cleanup_paths();
@@ -547,12 +580,14 @@ fn perform_scan() -> Result<ScanResult, String> {
     }
 
     let total_bytes = scanned_roots.iter().map(|node| node.size_bytes).sum();
+    let activity = claude_activity();
     Ok(ScanResult {
         platform: std::env::consts::OS.to_string(),
         scanned_at: Local::now().to_rfc3339(),
         total_bytes,
         roots: scanned_roots,
-        claude_running: is_claude_running(),
+        claude_running: activity == ClaudeActivity::Window,
+        claude_activity: activity,
         warnings,
     })
 }
@@ -563,6 +598,10 @@ fn perform_clean(paths: &[String]) -> Result<CleanResult, String> {
     let mut deleted_paths = Vec::new();
     let mut skipped_paths = Vec::new();
     let mut errors = Vec::new();
+
+    if paths.is_empty() {
+        return Err("No cleanup paths were selected.".to_string());
+    }
 
     for raw in paths {
         let path = PathBuf::from(raw);
@@ -584,17 +623,44 @@ fn perform_clean(paths: &[String]) -> Result<CleanResult, String> {
             continue;
         }
 
-        let size = dir_size(&path).unwrap_or(0);
-        match remove_path_contents_or_file(&path) {
-            Ok(()) => {
-                cleaned_bytes += size;
-                deleted_paths.push(raw.clone());
-            }
-            Err(error) => {
-                skipped_paths.push(raw.clone());
-                errors.push(format!("{}: {}", raw, error));
-            }
+        let before_size = dir_size(&path).unwrap_or(0);
+        let stats = remove_path_contents_or_file(&path);
+        let after_size = if path.exists() {
+            dir_size(&path).unwrap_or(0)
+        } else {
+            0
+        };
+        let freed_bytes = before_size.saturating_sub(after_size);
+
+        if freed_bytes > 0 || stats.removed_entries > 0 {
+            cleaned_bytes += freed_bytes;
+            deleted_paths.push(raw.clone());
+        } else {
+            skipped_paths.push(raw.clone());
         }
+
+        if before_size > 0
+            && freed_bytes == 0
+            && stats.removed_entries == 0
+            && stats.errors.is_empty()
+        {
+            errors.push(format!("{}: no files were removed", raw));
+        }
+
+        errors.extend(
+            stats
+                .errors
+                .into_iter()
+                .map(|error| format!("{}: {}", raw, error)),
+        );
+    }
+
+    if cleaned_bytes == 0 && deleted_paths.is_empty() && !errors.is_empty() {
+        return Err(format_cleanup_errors(&errors));
+    }
+
+    if cleaned_bytes == 0 && deleted_paths.is_empty() && skipped_paths.len() == paths.len() {
+        return Err("Cleanup did not remove any files from the selected paths.".to_string());
     }
 
     let remaining_bytes = perform_scan().map(|scan| scan.total_bytes).unwrap_or(0);
@@ -606,6 +672,69 @@ fn perform_clean(paths: &[String]) -> Result<CleanResult, String> {
         remaining_bytes,
         cleaned_at,
     })
+}
+
+fn format_cleanup_errors(errors: &[String]) -> String {
+    const MAX_ERRORS: usize = 5;
+    let mut message = "Cleanup did not remove any files.".to_string();
+    for error in errors.iter().take(MAX_ERRORS) {
+        message.push_str("\n- ");
+        message.push_str(error);
+    }
+    if errors.len() > MAX_ERRORS {
+        message.push_str(&format!(
+            "\n- ... and {} more error(s)",
+            errors.len() - MAX_ERRORS
+        ));
+    }
+    message
+}
+
+fn remove_path_contents_or_file(path: &Path) -> RemoveStats {
+    let mut stats = RemoveStats::default();
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        stats
+            .errors
+            .push(format!("Cannot read metadata for {}", path.display()));
+        return stats;
+    };
+
+    if metadata.file_type().is_symlink() {
+        stats
+            .errors
+            .push(format!("Skipped symlink {}", path.display()));
+        return stats;
+    }
+
+    if metadata.is_file() {
+        remove_file_entry(path, &mut stats);
+        return stats;
+    }
+
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) => {
+            stats.errors.push(format!(
+                "Cannot read directory {}: {}",
+                path.display(),
+                error
+            ));
+            return stats;
+        }
+    };
+
+    for entry in entries {
+        match entry {
+            Ok(entry) => remove_entry_tree(&entry.path(), &mut stats),
+            Err(error) => stats.errors.push(format!(
+                "Cannot read directory entry in {}: {}",
+                path.display(),
+                error
+            )),
+        }
+    }
+
+    stats
 }
 
 fn scan_path(
@@ -1002,6 +1131,8 @@ fn classify_path(path: &Path) -> (SafetyLevel, String) {
         )
     } else if normalized.contains("vm_bundles\\warm")
         || normalized.contains("vm_bundles/warm")
+        || normalized.ends_with("\\temp\\claude")
+        || normalized.ends_with("/temp/claude")
         || normalized.ends_with("\\cache")
         || normalized.ends_with("/cache")
         || normalized.contains("code cache")
@@ -1051,32 +1182,103 @@ fn is_allowed_cleanup_target(path: &Path) -> bool {
     })
 }
 
-fn remove_path_contents_or_file(path: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
+fn remove_entry_tree(path: &Path, stats: &mut RemoveStats) {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            stats.errors.push(format!(
+                "Cannot read metadata for {}: {}",
+                path.display(),
+                error
+            ));
+            return;
+        }
+    };
+
     if metadata.file_type().is_symlink() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "symlink cleanup is not allowed",
-        ));
-    }
-    if metadata.is_file() {
-        return fs::remove_file(path);
+        stats
+            .errors
+            .push(format!("Skipped symlink {}", path.display()));
+        return;
     }
 
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let child_path = entry.path();
-        let child_meta = fs::symlink_metadata(&child_path)?;
-        if child_meta.file_type().is_symlink() {
-            continue;
+    if metadata.is_file() {
+        remove_file_entry(path, stats);
+        return;
+    }
+
+    if metadata.is_dir() {
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) => {
+                stats.errors.push(format!(
+                    "Cannot read directory {}: {}",
+                    path.display(),
+                    error
+                ));
+                return;
+            }
+        };
+
+        for entry in entries {
+            match entry {
+                Ok(entry) => remove_entry_tree(&entry.path(), stats),
+                Err(error) => stats.errors.push(format!(
+                    "Cannot read directory entry in {}: {}",
+                    path.display(),
+                    error
+                )),
+            }
         }
-        if child_meta.is_dir() {
-            fs::remove_dir_all(child_path)?;
-        } else {
-            fs::remove_file(child_path)?;
+
+        remove_dir_entry(path, stats);
+    }
+}
+
+fn remove_file_entry(path: &Path, stats: &mut RemoveStats) {
+    match fs::remove_file(path) {
+        Ok(()) => stats.removed_entries += 1,
+        Err(first_error) => {
+            make_writable(path);
+            match fs::remove_file(path) {
+                Ok(()) => stats.removed_entries += 1,
+                Err(second_error) => stats.errors.push(format!(
+                    "Cannot remove file {}: {}; retry after writable: {}",
+                    path.display(),
+                    first_error,
+                    second_error
+                )),
+            }
         }
     }
-    Ok(())
+}
+
+fn remove_dir_entry(path: &Path, stats: &mut RemoveStats) {
+    match fs::remove_dir(path) {
+        Ok(()) => stats.removed_entries += 1,
+        Err(first_error) => {
+            make_writable(path);
+            match fs::remove_dir(path) {
+                Ok(()) => stats.removed_entries += 1,
+                Err(second_error) => stats.errors.push(format!(
+                    "Cannot remove directory {}: {}; retry after writable: {}",
+                    path.display(),
+                    first_error,
+                    second_error
+                )),
+            }
+        }
+    }
+}
+
+fn make_writable(path: &Path) {
+    if let Ok(metadata) = fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        if permissions.readonly() {
+            permissions.set_readonly(false);
+            let _ = fs::set_permissions(path, permissions);
+        }
+    }
 }
 
 fn dir_size(path: &Path) -> io::Result<u64> {
@@ -1120,13 +1322,68 @@ fn format_debug_bytes(bytes: u64) -> String {
     }
 }
 
+fn claude_activity_blocks_cleanup(activity: ClaudeActivity) -> bool {
+    activity != ClaudeActivity::NotDetected
+}
+
+fn claude_cleanup_block_message(activity: ClaudeActivity) -> String {
+    match activity {
+        ClaudeActivity::Background => {
+            "Claude background processes are still running and may be locking cache files. Fully quit Claude from the tray or Task Manager, then scan again.".to_string()
+        }
+        ClaudeActivity::Window => {
+            "Claude Desktop is running. Close Claude or allow cleanup while it is running.".to_string()
+        }
+        ClaudeActivity::NotDetected => "Claude is not detected.".to_string(),
+    }
+}
+
 fn is_claude_running() -> bool {
+    claude_activity() == ClaudeActivity::Window
+}
+
+fn claude_activity() -> ClaudeActivity {
     let mut system = System::new_all();
     system.refresh_processes();
     let current_pid = std::process::id().to_string();
-    system.processes().iter().any(|(pid, process)| {
-        is_claude_desktop_process_name(process.name(), &pid.to_string(), &current_pid)
-    })
+
+    match std::env::consts::OS {
+        "windows" => {
+            let process_ids = system
+                .processes()
+                .iter()
+                .filter_map(|(pid, process)| {
+                    if is_claude_desktop_process_name(
+                        process.name(),
+                        &pid.to_string(),
+                        &current_pid,
+                    ) {
+                        pid.to_string().parse::<u32>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            if process_ids.is_empty() {
+                ClaudeActivity::NotDetected
+            } else if windows_has_visible_window_for_processes(&process_ids) {
+                ClaudeActivity::Window
+            } else {
+                ClaudeActivity::Background
+            }
+        }
+        _ => {
+            let detected = system.processes().iter().any(|(pid, process)| {
+                is_claude_desktop_process_name(process.name(), &pid.to_string(), &current_pid)
+            });
+            if detected {
+                ClaudeActivity::Window
+            } else {
+                ClaudeActivity::NotDetected
+            }
+        }
+    }
 }
 
 fn is_claude_desktop_process_name(
@@ -1162,6 +1419,60 @@ fn is_claude_desktop_process_name_for_os(
         "macos" => name == "Claude",
         _ => false,
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_has_visible_window_for_processes(process_ids: &[u32]) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{BOOL, HWND, LPARAM},
+        UI::WindowsAndMessaging::{
+            EnumWindows, GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible,
+        },
+    };
+
+    struct SearchState<'a> {
+        process_ids: &'a [u32],
+        found: bool,
+    }
+
+    unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let state = &mut *(lparam as *mut SearchState<'_>);
+        if state.found || IsWindowVisible(hwnd) == 0 || GetWindowTextLengthW(hwnd) <= 0 {
+            return 1;
+        }
+
+        let mut window_pid = 0;
+        GetWindowThreadProcessId(hwnd, &mut window_pid);
+        if state.process_ids.contains(&window_pid) {
+            state.found = true;
+            return 0;
+        }
+
+        1
+    }
+
+    if process_ids.is_empty() {
+        return false;
+    }
+
+    let mut state = SearchState {
+        process_ids,
+        found: false,
+    };
+
+    unsafe {
+        EnumWindows(
+            Some(enum_windows_proc),
+            &mut state as *mut SearchState<'_> as LPARAM,
+        );
+    }
+
+    state.found
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_has_visible_window_for_processes(_process_ids: &[u32]) -> bool {
+    false
 }
 
 fn calculate_growth_alert(state: &PersistedState) -> GrowthAlert {
@@ -1350,5 +1661,36 @@ mod tests {
 
         assert_eq!(root.safety, SafetyLevel::Safe);
         assert!(root.default_cleanup);
+    }
+
+    #[test]
+    fn windows_temp_claude_root_is_safe_cleanup_target() {
+        let root = root(
+            PathBuf::from(r"C:\Users\Admin\AppData\Local\Temp\claude"),
+            "Claude temp files",
+        );
+
+        assert_eq!(root.safety, SafetyLevel::Safe);
+        assert!(root.default_cleanup);
+    }
+
+    #[test]
+    fn cleanup_removes_nested_contents_without_removing_selected_directory() {
+        let root =
+            std::env::temp_dir().join(format!("ccw-cleanup-test-{}-nested", std::process::id()));
+        let nested = root.join("child").join("nested");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("top.txt"), b"top").unwrap();
+        fs::write(nested.join("cache.bin"), b"cache").unwrap();
+
+        let stats = remove_path_contents_or_file(&root);
+
+        assert!(stats.errors.is_empty(), "{:?}", stats.errors);
+        assert!(root.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        assert!(stats.removed_entries >= 3);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

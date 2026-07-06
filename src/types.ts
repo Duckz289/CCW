@@ -1,4 +1,5 @@
 export type SafetyLevel = "Safe" | "Caution" | "NotRecommended";
+export type ClaudeActivity = "not_detected" | "background" | "window";
 
 export interface CacheNode {
   label: string;
@@ -19,6 +20,7 @@ export interface ScanResult {
   total_bytes: number;
   roots: CacheNode[];
   claude_running: boolean;
+  claude_activity: ClaudeActivity;
   warnings: string[];
 }
 

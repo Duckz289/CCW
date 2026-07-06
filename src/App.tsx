@@ -9,24 +9,30 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
+import normalFrame from "../action/NORMAL.png";
 import { IssueHub } from "./components/IssueHub";
 import { Mascot } from "./components/Mascot";
 import { Treemap } from "./components/Treemap";
-import { cleanCache, evaluateGrowthAlert, exportReport, getCleanHistory, getSchedulerSettings, saveSchedulerSettings, scanCache } from "./lib/tauri";
+import { cleanCache, evaluateGrowthAlert, exportReport, getClaudeActivity, getCleanHistory, getSchedulerSettings, saveSchedulerSettings, scanCache } from "./lib/tauri";
 import { formatBytes, formatDate } from "./lib/format";
-import type { CacheNode, CleanHistoryEntry, GrowthAlert, ScanResult, SchedulerSettings } from "./types";
+import type { CacheNode, ClaudeActivity, CleanHistoryEntry, GrowthAlert, ScanResult, SchedulerSettings } from "./types";
 import { languageLabels, localizeDynamicText, translations, type Language } from "./i18n";
 
 type Tab = "overview" | "history" | "automation" | "issues";
 type StatusText = Record<Language, string>;
+type Copy = (typeof translations)[Language];
 
 function flattenNodes(nodes: CacheNode[]): CacheNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children)]);
 }
 
+function hasNonZeroSize(node: CacheNode): boolean {
+  return node.exists && node.size_bytes > 0;
+}
+
 function defaultSafeSelection(scan: ScanResult | null): Set<string> {
   if (!scan) return new Set();
-  return new Set(flattenNodes(scan.roots).filter((node) => node.default_cleanup && node.exists).map((node) => node.path));
+  return new Set(flattenNodes(scan.roots).filter((node) => node.default_cleanup && hasNonZeroSize(node)).map((node) => node.path));
 }
 
 function containsNodePath(parent: CacheNode, path: string): boolean {
@@ -81,8 +87,36 @@ export default function App() {
     }
   }
 
+  async function refreshClaudeActivity() {
+    try {
+      const claudeActivity = await getClaudeActivity();
+      setScan((current) => current ? { ...current, claude_activity: claudeActivity, claude_running: claudeActivity === "window" } : current);
+    } catch {
+      // Process status is advisory; full scans and cleanup still validate in the backend.
+    }
+  }
+
   useEffect(() => {
     void refreshAll();
+  }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void refreshClaudeActivity();
+    }, 5000);
+    const handleVisibility = () => {
+      if (!document.hidden) void refreshClaudeActivity();
+    };
+    const handleFocus = () => {
+      void refreshClaudeActivity();
+    };
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
   }, []);
 
   useEffect(() => {
@@ -91,16 +125,18 @@ export default function App() {
   }, [copy.appTitle, language]);
 
   const flattenedNodes = useMemo(() => flattenNodes(scan?.roots ?? []), [scan]);
+  const visibleNodes = useMemo(() => flattenedNodes.filter(hasNonZeroSize), [flattenedNodes]);
+  const visibleRoots = useMemo(() => (scan?.roots ?? []).filter(hasNonZeroSize), [scan]);
 
   const selectedBytes = useMemo(() => {
-    return flattenedNodes
+    return visibleNodes
       .filter((node) => selectedPaths.has(node.path))
       .reduce((sum, node) => sum + node.size_bytes, 0);
-  }, [flattenedNodes, selectedPaths]);
+  }, [selectedPaths, visibleNodes]);
 
   const nodeByPath = useMemo(() => {
-    return new Map(flattenedNodes.map((node) => [node.path, node]));
-  }, [flattenedNodes]);
+    return new Map(visibleNodes.map((node) => [node.path, node]));
+  }, [visibleNodes]);
 
   function confirmRiskySelection(node: CacheNode) {
     if (node.safety === "Safe" || selectedPaths.has(node.path)) return true;
@@ -136,8 +172,11 @@ export default function App() {
 
   async function handleClean() {
     if (!scan || selectedPaths.size === 0) return;
-    if (scan.claude_running && !settings?.clean_when_claude_running) {
-      setStatusText(translations.en.status.cleanBlocked, translations.vi.status.cleanBlocked);
+    if (claudeBlocksCleanup(scan.claude_activity) && !settings?.clean_when_claude_running) {
+      setStatusText(
+        cleanupBlockedMessage(translations.en, scan.claude_activity),
+        cleanupBlockedMessage(translations.vi, scan.claude_activity),
+      );
       return;
     }
     setBusy(true);
@@ -145,10 +184,17 @@ export default function App() {
     try {
       const result = await cleanCache({ paths: Array.from(selectedPaths), allow_when_running: !!settings?.clean_when_claude_running });
       const cleanedBytes = formatBytes(result.cleaned_bytes);
-      setStatusText(translations.en.status.cleaned(cleanedBytes, result.deleted_paths.length), translations.vi.status.cleaned(cleanedBytes, result.deleted_paths.length));
+      if (result.errors.length > 0) {
+        setStatusText(
+          translations.en.status.cleanedWithErrors(cleanedBytes, result.deleted_paths.length, result.errors.length),
+          translations.vi.status.cleanedWithErrors(cleanedBytes, result.deleted_paths.length, result.errors.length),
+        );
+      } else {
+        setStatusText(translations.en.status.cleaned(cleanedBytes, result.deleted_paths.length), translations.vi.status.cleaned(cleanedBytes, result.deleted_paths.length));
+      }
       await refreshAll();
     } catch (error) {
-      setStatusText(error instanceof Error ? error.message : translations.en.status.cleanupFailed, error instanceof Error ? error.message : translations.vi.status.cleanupFailed);
+      setStatusText(getErrorMessage(error, translations.en.status.cleanupFailed), getErrorMessage(error, translations.vi.status.cleanupFailed));
     } finally {
       setCleaning(false);
       setBusy(false);
@@ -186,7 +232,7 @@ export default function App() {
           <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
             <div className="flex items-center gap-4">
               <div className="grid h-14 w-14 place-items-center rounded-[18px] bg-panel2 shadow-inner">
-                <span className="text-2xl font-black text-accent">CCW</span>
+                <img className="h-10 w-10 object-contain [image-rendering:pixelated]" src={normalFrame} alt="" draggable={false} />
               </div>
               <div>
                 <h1 className="text-2xl font-black tracking-normal text-text">{copy.appTitle}</h1>
@@ -225,17 +271,17 @@ export default function App() {
           <nav className="grid grid-cols-2 gap-2 md:flex">
             {tabs.map((item) => (
               <button key={item.id} className={`nav-button ${tab === item.id ? "nav-button-active" : ""}`} type="button" onClick={() => setTab(item.id)}>
-                <span className="nav-mark">{item.short}</span>
+                {item.short && <span className="nav-mark">{item.short}</span>}
                 <span>{item.label}</span>
               </button>
             ))}
           </nav>
         </header>
 
-        {scan?.claude_running && (
+        {scan && claudeBlocksCleanup(scan.claude_activity) && (
           <div className="swamp-alert mt-5 bg-warn/15 text-warn">
             <AlertTriangle className="mt-0.5 shrink-0" size={18} />
-            <p className="text-sm">{copy.warnings.claudeRunning}</p>
+            <p className="text-sm">{claudeWarning(copy, scan.claude_activity)}</p>
           </div>
         )}
 
@@ -281,17 +327,17 @@ export default function App() {
                   <p className="text-sm font-semibold text-accent">{copy.overview.readyToClear}</p>
                   <p className="mt-3 text-5xl font-black leading-none text-text">{formatBytes(selectedBytes)}</p>
                   <p className="mt-3 text-sm leading-6 text-muted">
-                    {copy.overview.selectedSummary(selectedPaths.size.toLocaleString(), flattenedNodes.length.toLocaleString())}
+                    {copy.overview.selectedSummary(selectedPaths.size.toLocaleString(), visibleNodes.length.toLocaleString())}
                   </p>
                   <div className="mt-6 grid gap-3">
-                    <StatusLine label={copy.overview.claudeProcess} value={scan?.claude_running ? copy.overview.running : copy.overview.notDetected} active={!!scan?.claude_running} />
+                    <StatusLine label={copy.overview.claudeProcess} value={claudeActivityLabel(copy, scan?.claude_activity)} active={scan ? claudeBlocksCleanup(scan.claude_activity) : false} />
                     <StatusLine label={copy.overview.wardenState} value={cleaning ? copy.overview.cleaning : alertActive ? copy.overview.alert : copy.overview.standingBy} active={alertActive || cleaning} />
                     <StatusLine label={copy.overview.safeDefault} value={copy.overview.paths(defaultSafeSelection(scan).size.toLocaleString())} active={false} />
                   </div>
                 </div>
               </section>
 
-              <Treemap nodes={scan?.roots ?? []} selectedPaths={selectedPaths} onToggleNode={toggleNode} copy={copy.treemap} language={language} />
+              <Treemap nodes={visibleRoots} selectedPaths={selectedPaths} onToggleNode={toggleNode} copy={copy.treemap} language={language} />
 
               <section className="surface p-4 md:p-5">
                 <div className="flex flex-col justify-between gap-2 md:flex-row md:items-end">
@@ -302,7 +348,7 @@ export default function App() {
                   <FolderSearch className="hidden text-accent md:block" size={24} />
                 </div>
                 <div className="mt-4 grid gap-2">
-                  {flattenedNodes.map((node) => (
+                  {visibleNodes.map((node) => (
                     <label key={node.path} className="path-row">
                       <input className="mt-1 h-4 w-4 accent-accent" type="checkbox" checked={selectedPaths.has(node.path)} onChange={() => toggleNode(node)} />
                       <span className="min-w-0">
@@ -328,6 +374,14 @@ export default function App() {
                       <div>
                         <p className="font-black text-text">{formatDate(item.cleaned_at)}</p>
                         <p className="mt-1 text-sm text-muted">{copy.history.trigger}: {localizeDynamicText(language, item.trigger)}</p>
+                        {item.errors.length > 0 && (
+                          <div className="mt-3 rounded border border-warn/30 bg-warn/10 p-3 text-xs text-warn">
+                            <p className="font-black">{copy.history.errors}</p>
+                            {item.errors.slice(0, 3).map((error) => (
+                              <p key={error} className="mt-1 break-words">{error}</p>
+                            ))}
+                          </div>
+                        )}
                       </div>
                       <div className="text-left md:text-right">
                         <p className="font-black text-accent">{formatBytes(item.cleaned_bytes)}</p>
@@ -411,4 +465,35 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
       <input className="h-5 w-5 accent-accent" type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
     </label>
   );
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  if (message.trim().length > 0) return compactStatusMessage(message);
+  return fallback;
+}
+
+function compactStatusMessage(message: string) {
+  const normalized = message.replace(/\s+/g, " ").trim();
+  return normalized.length > 240 ? `${normalized.slice(0, 237)}...` : normalized;
+}
+
+function claudeBlocksCleanup(activity: ClaudeActivity) {
+  return activity !== "not_detected";
+}
+
+function claudeActivityLabel(copy: Copy, activity?: ClaudeActivity) {
+  if (activity === "window") return copy.overview.running;
+  if (activity === "background") return copy.overview.background;
+  return copy.overview.notDetected;
+}
+
+function claudeWarning(copy: Copy, activity: ClaudeActivity) {
+  if (activity === "background") return copy.warnings.claudeBackground;
+  return copy.warnings.claudeRunning;
+}
+
+function cleanupBlockedMessage(copy: Copy, activity: ClaudeActivity) {
+  if (activity === "background") return copy.status.cleanBlockedBackground;
+  return copy.status.cleanBlocked;
 }

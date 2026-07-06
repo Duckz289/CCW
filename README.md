@@ -122,6 +122,40 @@ Build production bundles:
 npm run tauri:build
 ```
 
+Package a Windows portable zip after the release executable exists:
+
+```bash
+npm run package:portable
+```
+
+## Portable Build
+
+Use the portable build for quick Windows testing when you want to send one zip to someone and let them double-click the app without installing it. The script copies `src-tauri/target/release/claude-cache-warden.exe` to `dist-portable/ClaudeCacheWarden-portable/Claude Cache Warden (Portable).exe`, adds a bilingual `README-portable.txt`, and creates `dist-portable/ClaudeCacheWarden-portable-v0.1.0.zip`.
+
+The portable `.exe` does not install Microsoft Edge WebView2 Runtime. Most Windows 11 machines already have it, but older Windows 10 machines may need the runtime from Microsoft. The portable README also notes that unsigned builds may trigger Windows SmartScreen and explains the "More info" -> "Run anyway" path.
+
+Use NSIS/MSI installers from `npm run tauri:build` for the main distribution path. Installers integrate with Windows installation flows, Start Menu/Programs, and WebView2 bootstrap behavior. Use `npm run package:portable` for fast sharing and informal testing.
+
+## Release Size Check
+
+The publish size is the final installer size, not the development workspace size. `node_modules` and Rust build caches such as `src-tauri/target/debug` can be several GB during development and are ignored by git.
+
+Build the release bundles:
+
+```bash
+npm run tauri:build
+```
+
+Then check the generated installer:
+
+- Windows NSIS: `src-tauri/target/release/bundle/nsis/*.exe`
+- Windows MSI: `src-tauri/target/release/bundle/msi/*.msi`
+- macOS DMG: `src-tauri/target/release/bundle/dmg/*.dmg`
+
+Those files are the sizes that matter for publishing. Tauri uses the OS WebView runtime instead of bundling a browser engine, so the final installers are normally much smaller than the full development folder.
+
+The current icon set was generated with `npm run tauri -- icon action/NORMAL_icon_1024.png`. That source is a temporary 1024x1024 upscale of the pixel-art frog asset at `action/NORMAL.png` and can be replaced later with a higher-quality square source image.
+
 ## Validation
 
 Frontend:

@@ -32,7 +32,9 @@ export const translations = {
       scanned: (date: string) => `Scanned ${date}`,
       scanFailed: "Scan failed",
       cleanBlocked: "Claude is running. Enable cleanup while Claude is running in Automation settings to continue.",
+      cleanBlockedBackground: "Claude is still running in the background and may be locking cache files. Fully quit Claude from the tray or Task Manager, then scan again.",
       cleaned: (bytes: string, count: number) => `Cleaned ${bytes} from ${count} location(s).`,
+      cleanedWithErrors: (bytes: string, count: number, errors: number) => `Cleaned ${bytes} from ${count} location(s), with ${errors} error(s).`,
       cleanupFailed: "Cleanup failed",
       reportExported: (path: string) => `Report exported: ${path}`,
       exportFailed: "Export failed",
@@ -40,6 +42,8 @@ export const translations = {
     warnings: {
       claudeRunning:
         "Claude Desktop appears to be running. Cleanup is blocked unless you explicitly allow cleanup while Claude is running in Automation settings.",
+      claudeBackground:
+        "Claude background processes are still running and can lock cache files. Fully quit Claude from the tray or Task Manager before cleaning.",
     },
     overview: {
       kicker: "Swamp scan",
@@ -53,6 +57,7 @@ export const translations = {
       selectedSummary: (selected: string, total: string) => `${selected} selected path${selected === "1" ? "" : "s"} from ${total} detected entries.`,
       claudeProcess: "Claude process",
       running: "Running",
+      background: "Background",
       notDetected: "Not detected",
       wardenState: "Warden state",
       cleaning: "Cleaning",
@@ -88,6 +93,7 @@ export const translations = {
       empty: "No cleanup history yet.",
       trigger: "Trigger",
       remaining: "Remaining",
+      errors: "Errors",
     },
     automation: {
       scheduler: "Scheduler",
@@ -119,7 +125,7 @@ export const translations = {
     },
     tabShort: {
       overview: "Xem",
-      history: "Sử",
+      history: "",
       automation: "Auto",
       issues: "Live",
     },
@@ -133,7 +139,9 @@ export const translations = {
       scanned: (date: string) => `Đã quét lúc ${date}`,
       scanFailed: "Quét thất bại",
       cleanBlocked: "Claude đang chạy. Hãy bật tùy chọn cho phép dọn khi Claude đang chạy trong tab Tự động để tiếp tục.",
+      cleanBlockedBackground: "Claude vẫn đang chạy nền và có thể đang khóa file cache. Hãy thoát hẳn Claude từ tray hoặc Task Manager rồi quét lại.",
       cleaned: (bytes: string, count: number) => `Đã dọn ${bytes} ở ${count} vị trí.`,
+      cleanedWithErrors: (bytes: string, count: number, errors: number) => `Đã dọn ${bytes} ở ${count} vị trí, còn ${errors} lỗi.`,
       cleanupFailed: "Dọn dẹp thất bại",
       reportExported: (path: string) => `Đã xuất báo cáo: ${path}`,
       exportFailed: "Xuất báo cáo thất bại",
@@ -141,6 +149,8 @@ export const translations = {
     warnings: {
       claudeRunning:
         "Có vẻ Claude Desktop đang chạy. Việc dọn dẹp sẽ bị chặn trừ khi bạn cho phép dọn khi Claude đang chạy trong tab Tự động.",
+      claudeBackground:
+        "Claude vẫn đang chạy nền và có thể khóa file cache. Hãy thoát hẳn Claude từ tray hoặc Task Manager trước khi dọn.",
     },
     overview: {
       kicker: "Quét nhanh",
@@ -154,6 +164,7 @@ export const translations = {
       selectedSummary: (selected: string, total: string) => `Đã chọn ${selected} đường dẫn trên tổng ${total} mục phát hiện.`,
       claudeProcess: "Trạng thái Claude",
       running: "Đang chạy",
+      background: "Chạy nền",
       notDetected: "Không phát hiện",
       wardenState: "Trạng thái hệ thống",
       cleaning: "Đang dọn",
@@ -182,13 +193,14 @@ export const translations = {
       safety: {
         Safe: "An toàn",
         Caution: "Cần xem lại",
-        NotRecommended: "Không nên dọn",
+        NotRecommended: "Giữ nguyên",
       } satisfies Record<SafetyLevel, string>,
     },
     history: {
       empty: "Chưa có lịch sử dọn dẹp.",
       trigger: "Nguồn chạy",
       remaining: "Còn lại",
+      errors: "Lỗi",
     },
     automation: {
       scheduler: "Lịch chạy",

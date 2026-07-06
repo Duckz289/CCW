@@ -3,6 +3,7 @@ import type {
   CleanHistoryEntry,
   CleanRequest,
   CleanResult,
+  ClaudeActivity,
   GrowthAlert,
   ScanResult,
   SchedulerSettings,
@@ -13,6 +14,7 @@ const mockScan: ScanResult = {
   scanned_at: new Date().toISOString(),
   total_bytes: 8.7 * 1024 ** 3,
   claude_running: true,
+  claude_activity: "window",
   warnings: ["Preview data is shown because the app is running outside Tauri."],
   roots: [
     {
@@ -112,6 +114,16 @@ export async function saveSchedulerSettings(settings: SchedulerSettings): Promis
 export async function getCleanHistory(): Promise<CleanHistoryEntry[]> {
   if (!("__TAURI_INTERNALS__" in window)) return [];
   return invoke<CleanHistoryEntry[]>("get_clean_history");
+}
+
+export async function getClaudeRunning(): Promise<boolean> {
+  if (!("__TAURI_INTERNALS__" in window)) return mockScan.claude_running;
+  return invoke<boolean>("get_claude_running");
+}
+
+export async function getClaudeActivity(): Promise<ClaudeActivity> {
+  if (!("__TAURI_INTERNALS__" in window)) return mockScan.claude_activity;
+  return invoke<ClaudeActivity>("get_claude_activity");
 }
 
 export async function evaluateGrowthAlert(): Promise<GrowthAlert> {

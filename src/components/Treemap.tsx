@@ -23,7 +23,7 @@ export function Treemap({ nodes, selectedPaths, onToggleNode, copy, language }: 
   const total = nodes.reduce((sum, node) => sum + node.size_bytes, 0);
 
   useEffect(() => {
-    setExpandedPaths(new Set(nodes.filter((node) => node.children.length > 0).map((node) => node.path)));
+    setExpandedPaths(new Set(nodes.filter((node) => node.children.some((child) => child.size_bytes > 0)).map((node) => node.path)));
   }, [nodes]);
 
   if (total === 0) {
@@ -53,7 +53,8 @@ export function Treemap({ nodes, selectedPaths, onToggleNode, copy, language }: 
         const span = Math.max(2, Math.min(6, Math.round(share * 6)));
         const selected = selectedPaths.has(node.path);
         const expanded = expandedPaths.has(node.path);
-        const hasChildren = node.children.length > 0;
+        const visibleChildren = node.children.filter((child) => child.size_bytes > 0);
+        const hasChildren = visibleChildren.length > 0;
         return (
           <article
             key={node.path}
@@ -103,7 +104,7 @@ export function Treemap({ nodes, selectedPaths, onToggleNode, copy, language }: 
                 </p>
                 {hasChildren && expanded && (
                   <div className="mt-4 grid gap-2 md:grid-cols-2">
-                    {node.children.map((child) => (
+                    {visibleChildren.map((child) => (
                       <button
                         key={child.path}
                         type="button"
