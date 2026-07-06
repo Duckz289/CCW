@@ -2,7 +2,6 @@
 
 Claude Cache Warden là ứng dụng desktop nhẹ viết bằng Tauri, dùng để quét và dọn cache của Claude Desktop / Cowork trên Windows và macOS.
 
-Ứng dụng được thiết kế theo hướng local-only:
 
 - không telemetry
 - không backend service
