@@ -90,6 +90,20 @@ export async function cleanCache(request: CleanRequest): Promise<CleanResult> {
   return invoke<CleanResult>("clean_cache", { request });
 }
 
+export async function forceCleanCache(request: CleanRequest): Promise<CleanResult> {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    return {
+      cleaned_bytes: 0,
+      deleted_paths: request.paths,
+      skipped_paths: [],
+      errors: [],
+      remaining_bytes: mockScan.total_bytes,
+      cleaned_at: new Date().toISOString(),
+    };
+  }
+  return invoke<CleanResult>("force_clean_cache", { request });
+}
+
 export async function getSchedulerSettings(): Promise<SchedulerSettings> {
   if (!("__TAURI_INTERNALS__" in window)) {
     return {

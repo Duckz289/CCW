@@ -156,6 +156,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             scan_cache,
             clean_cache,
+            force_clean_cache,
             get_scheduler_settings,
             save_scheduler_settings,
             get_clean_history,
@@ -325,6 +326,32 @@ fn clean_cache(
         cleaned_bytes: result.cleaned_bytes,
         remaining_bytes: result.remaining_bytes,
         trigger: "manual".to_string(),
+        deleted_paths: result.deleted_paths.clone(),
+        errors: result.errors.clone(),
+    })?;
+    Ok(result)
+}
+
+#[tauri::command]
+fn force_clean_cache(
+    state: State<'_, Arc<AppState>>,
+    request: CleanRequest,
+) -> Result<CleanResult, String> {
+    if request.paths.len() != 1 {
+        return Err("Force cleanup accepts exactly one path.".to_string());
+    }
+
+    let activity = claude_activity();
+    if claude_activity_blocks_cleanup(activity) && !request.allow_when_running {
+        return Err(claude_cleanup_block_message(activity));
+    }
+
+    let result = perform_forced_clean(&request.paths)?;
+    state.push_history(CleanHistoryEntry {
+        cleaned_at: result.cleaned_at.clone(),
+        cleaned_bytes: result.cleaned_bytes,
+        remaining_bytes: result.remaining_bytes,
+        trigger: "manual-force".to_string(),
         deleted_paths: result.deleted_paths.clone(),
         errors: result.errors.clone(),
     })?;
@@ -593,6 +620,17 @@ fn perform_scan() -> Result<ScanResult, String> {
 }
 
 fn perform_clean(paths: &[String]) -> Result<CleanResult, String> {
+    perform_clean_with_policy(paths, true)
+}
+
+fn perform_forced_clean(paths: &[String]) -> Result<CleanResult, String> {
+    perform_clean_with_policy(paths, false)
+}
+
+fn perform_clean_with_policy(
+    paths: &[String],
+    require_safe_target: bool,
+) -> Result<CleanResult, String> {
     let cleaned_at = Local::now().to_rfc3339();
     let mut cleaned_bytes = 0;
     let mut deleted_paths = Vec::new();
@@ -617,9 +655,9 @@ fn perform_clean(paths: &[String]) -> Result<CleanResult, String> {
             ));
             continue;
         }
-        if classify_path(&path).0 == SafetyLevel::NotRecommended {
+        if require_safe_target && !is_cleanup_safe_target(&path) {
             skipped_paths.push(raw.clone());
-            errors.push(format!("Refused to clean not-recommended target: {}", raw));
+            errors.push(format!("Refused to clean non-safe target: {}", raw));
             continue;
         }
 
@@ -711,6 +749,11 @@ fn remove_path_contents_or_file(path: &Path) -> RemoveStats {
         return stats;
     }
 
+    if is_claude_vm_bundle_leaf(path) {
+        remove_vm_bundle_cache_contents(path, &mut stats);
+        return stats;
+    }
+
     let entries = match fs::read_dir(path) {
         Ok(entries) => entries,
         Err(error) => {
@@ -735,6 +778,36 @@ fn remove_path_contents_or_file(path: &Path) -> RemoveStats {
     }
 
     stats
+}
+
+fn remove_vm_bundle_cache_contents(path: &Path, stats: &mut RemoveStats) {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) => {
+            stats.errors.push(format!(
+                "Cannot read VM bundle directory {}: {}",
+                path.display(),
+                error
+            ));
+            return;
+        }
+    };
+
+    for entry in entries {
+        match entry {
+            Ok(entry) => {
+                let child_path = entry.path();
+                if is_rebuildable_vm_bundle_artifact(&child_path) {
+                    remove_entry_tree(&child_path, stats);
+                }
+            }
+            Err(error) => stats.errors.push(format!(
+                "Cannot read VM bundle entry in {}: {}",
+                path.display(),
+                error
+            )),
+        }
+    }
 }
 
 fn scan_path(
@@ -795,7 +868,7 @@ fn scan_path(
         }
         if child_meta.is_dir() {
             let (child_safety, child_description) = classify_path(&child_path);
-            let child_default_cleanup = default_cleanup && child_safety == SafetyLevel::Safe;
+            let child_default_cleanup = is_cleanup_safe_target(&child_path);
             let child_label = display_label(&child_path);
             let child = scan_path(
                 &child_path,
@@ -1068,7 +1141,7 @@ fn windows_store_package_branch_roots(package_root: &Path) -> Vec<KnownRoot> {
             package_root.join("LocalCache"),
             "Claude Store package cache",
         ),
-        review_root(
+        root(
             package_root.join("TempState"),
             "Claude Store package temp state",
         ),
@@ -1107,9 +1180,19 @@ fn classify_path(path: &Path) -> (SafetyLevel, String) {
     let normalized = path.to_string_lossy().to_ascii_lowercase();
     if is_path_leaf(path, "LocalCache") {
         (
+            SafetyLevel::NotRecommended,
+            "Contains cache plus Claude workspace, session, and app-state data. Do not clean the whole LocalCache root.".to_string(),
+        )
+    } else if is_rebuildable_vm_bundle_leaf(path) {
+        (
             SafetyLevel::Safe,
-            "Claude Store package cache. Review debug output before enabling automatic cleanup."
+            "Rebuildable Claude VM runtime bundle cache. Claude can recreate it after cleanup."
                 .to_string(),
+        )
+    } else if has_sensitive_state_segment(path) {
+        (
+            SafetyLevel::NotRecommended,
+            "May contain Claude projects, sessions, identity, browser storage, or workspace runtime data.".to_string(),
         )
     } else if is_path_leaf(path, "TempState") {
         (
@@ -1129,14 +1212,11 @@ fn classify_path(path: &Path) -> (SafetyLevel, String) {
             SafetyLevel::Caution,
             "Windows app-container data. Review this location before deleting.".to_string(),
         )
-    } else if normalized.contains("vm_bundles\\warm")
-        || normalized.contains("vm_bundles/warm")
-        || normalized.ends_with("\\temp\\claude")
+    } else if normalized.ends_with("\\temp\\claude")
         || normalized.ends_with("/temp/claude")
-        || normalized.ends_with("\\cache")
-        || normalized.ends_with("/cache")
-        || normalized.contains("code cache")
-        || normalized.contains("library/caches/claude")
+        || is_rebuildable_cache_leaf(path)
+        || normalized.ends_with("\\library\\caches\\claude")
+        || normalized.ends_with("/library/caches/claude")
     {
         (
             SafetyLevel::Safe,
@@ -1162,11 +1242,48 @@ fn classify_path(path: &Path) -> (SafetyLevel, String) {
 }
 
 fn safe_cleanup_paths() -> Vec<String> {
-    claude_roots()
-        .into_iter()
-        .filter(|root| root.default_cleanup)
-        .map(|root| root.path.to_string_lossy().to_string())
-        .collect()
+    let mut paths = Vec::new();
+    for root in claude_roots() {
+        if let Ok(node) = scan_path(
+            &root.path,
+            root.label,
+            root.safety,
+            root.default_cleanup,
+            root.description,
+        ) {
+            collect_default_cleanup_paths(&node, &mut paths);
+        }
+    }
+    paths
+}
+
+fn collect_default_cleanup_paths(node: &CacheNode, paths: &mut Vec<String>) {
+    if node.exists && node.default_cleanup && node.size_bytes > 0 {
+        paths.push(node.path.clone());
+        return;
+    }
+
+    for child in &node.children {
+        collect_default_cleanup_paths(child, paths);
+    }
+}
+
+fn is_cleanup_safe_target(path: &Path) -> bool {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return false;
+        }
+    }
+
+    if is_rebuildable_vm_bundle_leaf(path) {
+        return true;
+    }
+
+    if has_sensitive_state_segment(path) {
+        return false;
+    }
+
+    classify_path(path).0 == SafetyLevel::Safe
 }
 
 fn is_allowed_cleanup_target(path: &Path) -> bool {
@@ -1308,6 +1425,98 @@ fn is_path_leaf(path: &Path, expected: &str) -> bool {
     path.file_name()
         .map(|value| value.to_string_lossy().eq_ignore_ascii_case(expected))
         .unwrap_or(false)
+}
+
+fn is_rebuildable_cache_leaf(path: &Path) -> bool {
+    [
+        "Cache",
+        "Code Cache",
+        "GPUCache",
+        "DawnGraphiteCache",
+        "DawnWebGPUCache",
+    ]
+    .iter()
+    .any(|leaf| is_path_leaf(path, leaf))
+}
+
+fn is_rebuildable_vm_bundle_leaf(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    if !is_path_leaf(parent, "vm_bundles") {
+        return false;
+    }
+
+    path.file_name()
+        .map(|value| {
+            let leaf = value.to_string_lossy().to_ascii_lowercase();
+            leaf == "claudevm.bundle" || leaf == "warm"
+        })
+        .unwrap_or(false)
+}
+
+fn is_claude_vm_bundle_leaf(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    is_path_leaf(parent, "vm_bundles") && is_path_leaf(path, "claudevm.bundle")
+}
+
+fn is_rebuildable_vm_bundle_artifact(path: &Path) -> bool {
+    path.file_name()
+        .map(|value| {
+            matches!(
+                value.to_string_lossy().to_ascii_lowercase().as_str(),
+                "rootfs.vhdx"
+                    | "rootfs.vhdx.zst"
+                    | "initrd"
+                    | "initrd.zst"
+                    | "vmlinuz"
+                    | "vmlinuz.zst"
+                    | "smol-bin.vhdx"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn has_sensitive_state_segment(path: &Path) -> bool {
+    path.components().any(|component| {
+        let segment = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        matches!(
+            segment.as_str(),
+            "indexeddb"
+                | "local storage"
+                | "session storage"
+                | "file system"
+                | "service worker"
+                | "network"
+                | "partitions"
+                | "cookies"
+                | "local-agent-mode-sessions"
+                | "vm_bundles"
+                | "claude-code"
+                | "claude-code-vm"
+                | "settings"
+                | "localstate"
+                | "roamingstate"
+                | "systemappdata"
+                | "config"
+                | "preferences"
+                | "local state"
+                | "config.json"
+                | "claude_desktop_config.json"
+                | "git-worktrees.json"
+                | "buddy-tokens.json"
+                | "cowork-enabled-cli-ops.json"
+                | "ant-did"
+                | "dips"
+                | "dips-wal"
+                | "sharedstorage"
+                | "sharedstorage-wal"
+                | "shared dictionary"
+                | "webstorage"
+        )
+    })
 }
 
 fn format_debug_bytes(bytes: u64) -> String {
@@ -1621,34 +1830,33 @@ mod tests {
             PathBuf::from(r"C:\Users\Admin\AppData\Local\Packages\Claude_pzs8sxrjxfjjc");
         let roots = windows_store_package_branch_roots(&package_root);
 
-        assert!(roots.iter().all(|root| !root.default_cleanup));
         assert_eq!(
             roots
                 .iter()
                 .find(|root| is_path_leaf(&root.path, "LocalCache"))
-                .map(|root| root.safety),
-            Some(SafetyLevel::Safe)
+                .map(|root| (root.safety, root.default_cleanup)),
+            Some((SafetyLevel::NotRecommended, false))
         );
         assert_eq!(
             roots
                 .iter()
                 .find(|root| is_path_leaf(&root.path, "TempState"))
-                .map(|root| root.safety),
-            Some(SafetyLevel::Safe)
+                .map(|root| (root.safety, root.default_cleanup)),
+            Some((SafetyLevel::Safe, true))
         );
         assert_eq!(
             roots
                 .iter()
                 .find(|root| is_path_leaf(&root.path, "LocalState"))
-                .map(|root| root.safety),
-            Some(SafetyLevel::NotRecommended)
+                .map(|root| (root.safety, root.default_cleanup)),
+            Some((SafetyLevel::NotRecommended, false))
         );
         assert_eq!(
             roots
                 .iter()
                 .find(|root| is_path_leaf(&root.path, "SystemAppData"))
-                .map(|root| root.safety),
-            Some(SafetyLevel::Caution)
+                .map(|root| (root.safety, root.default_cleanup)),
+            Some((SafetyLevel::NotRecommended, false))
         );
     }
 
@@ -1661,6 +1869,122 @@ mod tests {
 
         assert_eq!(root.safety, SafetyLevel::Safe);
         assert!(root.default_cleanup);
+    }
+
+    #[test]
+    fn cleanup_safe_target_rejects_workspace_container_roots() {
+        assert!(!is_cleanup_safe_target(&PathBuf::from(
+            r"C:\Users\Admin\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache"
+        )));
+        assert!(!is_cleanup_safe_target(&PathBuf::from(
+            "/Users/example/Library/Application Support/Claude/vm_bundles"
+        )));
+        assert!(is_cleanup_safe_target(&PathBuf::from(
+            "/Users/example/Library/Application Support/Claude/vm_bundles/warm"
+        )));
+        assert!(is_cleanup_safe_target(&PathBuf::from(
+            r"C:\Users\Admin\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\vm_bundles\claudevm.bundle"
+        )));
+        assert!(is_cleanup_safe_target(&PathBuf::from(
+            "/Users/example/Library/Application Support/Claude/Cache"
+        )));
+    }
+
+    #[test]
+    fn cleanup_safe_target_rejects_claude_state_and_project_paths() {
+        let base = PathBuf::from(
+            r"C:\Users\Admin\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude",
+        );
+
+        for relative in [
+            "IndexedDB",
+            "Local Storage",
+            "Session Storage",
+            "Network",
+            "Partitions",
+            "local-agent-mode-sessions",
+            "vm_bundles",
+            "vm_bundles\\project",
+            "claude-code",
+            "claude-code-vm",
+            "config.json",
+            "Preferences",
+            "claude_desktop_config.json",
+            "git-worktrees.json",
+            "config\\Cache",
+            "SharedStorage",
+            "WebStorage",
+        ] {
+            let path = base.join(relative);
+            assert!(
+                !is_cleanup_safe_target(&path),
+                "state path must not be cleanup-safe: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_safe_target_allows_only_rebuildable_cache_leaves() {
+        let base = PathBuf::from(
+            r"C:\Users\Admin\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude",
+        );
+
+        for relative in [
+            "Cache",
+            "Code Cache",
+            "GPUCache",
+            "DawnGraphiteCache",
+            "DawnWebGPUCache",
+        ] {
+            let path = base.join(relative);
+            assert!(
+                is_cleanup_safe_target(&path),
+                "cache leaf should be cleanup-safe: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn scan_selects_safe_cache_leaves_inside_protected_store_root() {
+        let root_dir =
+            std::env::temp_dir().join(format!("ccw-scan-test-{}-LocalCache", std::process::id()));
+        let claude_dir = root_dir.join("Roaming").join("Claude");
+        let cache_dir = claude_dir.join("Cache");
+        let vm_bundle_dir = claude_dir.join("vm_bundles").join("claudevm.bundle");
+        let indexed_db_dir = claude_dir.join("IndexedDB");
+        let local_storage_dir = claude_dir.join("Local Storage");
+        let _ = fs::remove_dir_all(&root_dir);
+
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::create_dir_all(&vm_bundle_dir).unwrap();
+        fs::create_dir_all(&indexed_db_dir).unwrap();
+        fs::create_dir_all(&local_storage_dir).unwrap();
+        fs::write(cache_dir.join("renderer-cache.bin"), b"cache").unwrap();
+        fs::write(vm_bundle_dir.join("rootfs.vhdx"), b"vm-cache").unwrap();
+        fs::write(indexed_db_dir.join("chat-state.leveldb"), b"state").unwrap();
+        fs::write(local_storage_dir.join("settings.localstorage"), b"state").unwrap();
+
+        let (safety, description) = classify_path(&root_dir);
+        let node = scan_path(
+            &root_dir,
+            "LocalCache".to_string(),
+            safety,
+            false,
+            description,
+        )
+        .unwrap();
+        let mut cleanup_paths = Vec::new();
+        collect_default_cleanup_paths(&node, &mut cleanup_paths);
+
+        assert!(cleanup_paths.contains(&cache_dir.to_string_lossy().to_string()));
+        assert!(cleanup_paths.contains(&vm_bundle_dir.to_string_lossy().to_string()));
+        assert!(!cleanup_paths.contains(&root_dir.to_string_lossy().to_string()));
+        assert!(!cleanup_paths.contains(&indexed_db_dir.to_string_lossy().to_string()));
+        assert!(!cleanup_paths.contains(&local_storage_dir.to_string_lossy().to_string()));
+
+        let _ = fs::remove_dir_all(&root_dir);
     }
 
     #[test]
@@ -1690,6 +2014,29 @@ mod tests {
         assert!(root.exists());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         assert!(stats.removed_entries >= 3);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cleanup_vm_bundle_preserves_session_data_file() {
+        let root = std::env::temp_dir().join(format!("ccw-vm-bundle-test-{}", std::process::id()));
+        let bundle = root.join("vm_bundles").join("claudevm.bundle");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(bundle.join("rootfs.vhdx"), b"runtime-cache").unwrap();
+        fs::write(bundle.join("rootfs.vhdx.zst"), b"runtime-cache").unwrap();
+        fs::write(bundle.join("initrd"), b"runtime-cache").unwrap();
+        fs::write(bundle.join("sessiondata.vhdx"), b"session-state").unwrap();
+
+        let stats = remove_path_contents_or_file(&bundle);
+
+        assert!(stats.errors.is_empty(), "{:?}", stats.errors);
+        assert!(bundle.exists());
+        assert!(!bundle.join("rootfs.vhdx").exists());
+        assert!(!bundle.join("rootfs.vhdx.zst").exists());
+        assert!(!bundle.join("initrd").exists());
+        assert!(bundle.join("sessiondata.vhdx").exists());
 
         let _ = fs::remove_dir_all(&root);
     }

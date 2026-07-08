@@ -43,6 +43,10 @@ button:disabled {
     @apply inline-flex h-11 items-center justify-center gap-2 whitespace-nowrap rounded-full bg-panel2 px-5 text-sm font-black text-text transition hover:bg-line/40 active:translate-y-px;
   }
 
+  .danger-button {
+    @apply inline-flex h-11 items-center justify-center gap-2 whitespace-nowrap rounded-full bg-danger px-5 text-sm font-black text-panel transition hover:bg-text active:translate-y-px disabled:cursor-not-allowed disabled:opacity-70;
+  }
+
   .language-switch {
     @apply inline-flex h-11 overflow-hidden rounded-full bg-ink p-1;
   }
@@ -112,5 +116,91 @@ button:disabled {
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     transform: translateY(8px);
+  }
+
+  .safety-modal-backdrop {
+    @apply fixed inset-0 z-50 grid place-items-center bg-text/45 px-4 py-6;
+    backdrop-filter: blur(3px);
+  }
+
+  .safety-modal {
+    @apply relative w-full max-w-[560px] overflow-hidden rounded-[28px] bg-panel text-text shadow-soft ring-1 ring-line/80;
+    animation: safety-modal-in 160ms ease-out both;
+  }
+
+  .safety-modal-ribbon {
+    @apply absolute left-0 top-0 h-full w-2 bg-accent;
+  }
+
+  .safety-modal-header {
+    @apply flex items-center gap-4 px-5 pb-4 pt-5 md:px-6 md:pt-6;
+    background:
+      radial-gradient(circle at 12% 12%, rgb(223 232 195 / 0.8), transparent 34%),
+      linear-gradient(135deg, rgb(255 248 232), rgb(243 234 215 / 0.92));
+  }
+
+  .safety-modal-icon {
+    @apply grid h-14 w-14 shrink-0 place-items-center rounded-[18px] bg-panel2 shadow-inner;
+  }
+
+  .safety-modal-icon img {
+    @apply h-10 w-10 object-contain;
+    image-rendering: pixelated;
+  }
+
+  .safety-modal-kicker {
+    @apply text-xs font-black uppercase tracking-wide text-accent;
+  }
+
+  .safety-modal-title {
+    @apply mt-1 text-2xl font-black leading-tight text-text;
+  }
+
+  .safety-modal-close {
+    @apply ml-auto grid h-10 w-10 shrink-0 place-items-center rounded-full bg-panel/80 text-muted transition hover:bg-panel2 hover:text-text active:translate-y-px;
+  }
+
+  .safety-modal-body {
+    @apply grid gap-4 px-5 py-4 md:px-6;
+  }
+
+  .safety-modal-callout {
+    @apply flex items-start gap-3 rounded-[18px] bg-danger/10 px-4 py-3 text-sm leading-6 text-text ring-1 ring-danger/20;
+  }
+
+  .safety-modal-callout svg {
+    @apply mt-1 shrink-0 text-danger;
+  }
+
+  .safety-modal-path-label {
+    @apply text-xs font-black uppercase tracking-wide text-muted;
+  }
+
+  .safety-modal-path {
+    @apply mt-2 block max-h-28 overflow-auto rounded-[16px] bg-ink px-4 py-3 font-mono text-xs leading-5 text-text ring-1 ring-line/70;
+    overflow-wrap: anywhere;
+  }
+
+  .safety-modal-footer {
+    @apply flex flex-col-reverse justify-end gap-2 border-t border-line/60 bg-ink/70 px-5 py-4 sm:flex-row md:px-6;
+  }
+
+  .safety-modal-action {
+    @apply min-w-28;
+  }
+
+  .safety-modal-force {
+    @apply min-w-44;
+  }
+}
+
+@keyframes safety-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }

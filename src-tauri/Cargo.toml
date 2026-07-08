@@ -1,6 +1,6 @@
 [package]
 name = "claude-cache-warden"
-version = "0.1.0"
+version = "0.1.1"
 description = "A local Claude Desktop cache scanner and cleaner"
 authors = ["Claude Cache Warden"]
 edition = "2021"

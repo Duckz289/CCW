@@ -6,6 +6,7 @@ import {
   RefreshCw,
   Settings,
   Trash2,
+  X,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
@@ -13,7 +14,7 @@ import normalFrame from "../action/NORMAL.png";
 import { IssueHub } from "./components/IssueHub";
 import { Mascot } from "./components/Mascot";
 import { Treemap } from "./components/Treemap";
-import { cleanCache, evaluateGrowthAlert, exportReport, getClaudeActivity, getCleanHistory, getSchedulerSettings, saveSchedulerSettings, scanCache } from "./lib/tauri";
+import { cleanCache, evaluateGrowthAlert, exportReport, forceCleanCache, getClaudeActivity, getCleanHistory, getSchedulerSettings, saveSchedulerSettings, scanCache } from "./lib/tauri";
 import { formatBytes, formatDate } from "./lib/format";
 import type { CacheNode, ClaudeActivity, CleanHistoryEntry, GrowthAlert, ScanResult, SchedulerSettings } from "./types";
 import { languageLabels, localizeDynamicText, translations, type Language } from "./i18n";
@@ -21,6 +22,11 @@ import { languageLabels, localizeDynamicText, translations, type Language } from
 type Tab = "overview" | "history" | "automation" | "issues";
 type StatusText = Record<Language, string>;
 type Copy = (typeof translations)[Language];
+type BlockedSelection = {
+  label: string;
+  path: string;
+  safety: string;
+};
 
 function flattenNodes(nodes: CacheNode[]): CacheNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children)]);
@@ -51,6 +57,7 @@ export default function App() {
   const [history, setHistory] = useState<CleanHistoryEntry[]>([]);
   const [growth, setGrowth] = useState<GrowthAlert | null>(null);
   const [status, setStatus] = useState<StatusText>({ en: translations.en.status.ready, vi: translations.vi.status.ready });
+  const [blockedSelection, setBlockedSelection] = useState<BlockedSelection | null>(null);
   const [busy, setBusy] = useState(false);
   const [cleaning, setCleaning] = useState(false);
   const copy = translations[language];
@@ -138,8 +145,30 @@ export default function App() {
     return new Map(visibleNodes.map((node) => [node.path, node]));
   }, [visibleNodes]);
 
+  function guardCleanupSelection(node: CacheNode) {
+    if (selectedPaths.has(node.path) || node.safety === "Safe") return true;
+
+    const label = localizeDynamicText(language, node.label);
+    const safety = copy.treemap.safety[node.safety];
+    setBlockedSelection({ label, path: node.path, safety });
+    setStatusText(
+      "Only Safe paths can be selected for cleanup. This item may contain chats, projects, sessions, settings, or Claude workspace data.",
+      "Chỉ những mục đánh dấu An toàn mới được chọn để dọn. Mục này có thể chứa chat, project, phiên làm việc, cài đặt hoặc dữ liệu workspace của Claude.",
+    );
+    return false;
+  }
+
   function confirmRiskySelection(node: CacheNode) {
-    if (node.safety === "Safe" || selectedPaths.has(node.path)) return true;
+    return guardCleanupSelection(node);
+    if (selectedPaths.has(node.path)) return true;
+    if (node.safety !== "Safe") {
+      setStatusText(
+        "Only Safe paths can be selected for cleanup. This location may contain workspace, session, or settings data.",
+        "Chi duong dan danh dau An toan moi duoc chon de don. Muc nay co the chua du lieu workspace, phien, hoac cai dat.",
+      );
+      return false;
+    }
+    if (node.safety === "Safe") return true;
     const label = localizeDynamicText(language, node.label);
     const safety = copy.treemap.safety[node.safety];
     return window.confirm(
@@ -149,7 +178,42 @@ export default function App() {
     );
   }
 
+  function cleanableDescendants(node: CacheNode) {
+    return flattenNodes(node.children).filter((child) => child.exists && child.size_bytes > 0 && child.safety === "Safe" && child.default_cleanup);
+  }
+
   function toggleNode(node: CacheNode) {
+    if (!selectedPaths.has(node.path) && node.safety !== "Safe") {
+      const descendants = cleanableDescendants(node);
+      if (descendants.length > 0) {
+        setSelectedPaths((current) => {
+          const next = new Set(current);
+          const descendantPaths = descendants.map((child) => child.path);
+          const allSelected = descendantPaths.every((path) => next.has(path));
+
+          for (const path of Array.from(next)) {
+            const selectedNode = nodeByPath.get(path);
+            if (selectedNode && (containsNodePath(node, path) || containsNodePath(selectedNode, node.path))) {
+              next.delete(path);
+            }
+          }
+
+          if (!allSelected) {
+            for (const path of descendantPaths) next.add(path);
+          }
+
+          return next;
+        });
+        const cleanableBytes = descendants.reduce((sum, child) => sum + child.size_bytes, 0);
+        const label = localizeDynamicText(language, node.label);
+        setStatusText(
+          `Selected ${formatBytes(cleanableBytes)} of safe cache inside "${label}". Protected state folders were left out.`,
+          `Đã chọn ${formatBytes(cleanableBytes)} cache an toàn bên trong "${label}". Các thư mục state được giữ lại.`,
+        );
+        return;
+      }
+    }
+
     if (!confirmRiskySelection(node)) return;
     setSelectedPaths((current) => {
       const next = new Set(current);
@@ -194,6 +258,34 @@ export default function App() {
       }
       await refreshAll();
     } catch (error) {
+      setStatusText(getErrorMessage(error, translations.en.status.cleanupFailed), getErrorMessage(error, translations.vi.status.cleanupFailed));
+    } finally {
+      setCleaning(false);
+      setBusy(false);
+    }
+  }
+
+  async function handleForceClean(item: BlockedSelection) {
+    setBusy(true);
+    setCleaning(true);
+    try {
+      const result = await forceCleanCache({ paths: [item.path], allow_when_running: true });
+      const cleanedBytes = formatBytes(result.cleaned_bytes);
+      setBlockedSelection(null);
+      if (result.errors.length > 0) {
+        setStatusText(
+          translations.en.status.cleanedWithErrors(cleanedBytes, result.deleted_paths.length, result.errors.length),
+          translations.vi.status.cleanedWithErrors(cleanedBytes, result.deleted_paths.length, result.errors.length),
+        );
+      } else {
+        setStatusText(
+          translations.en.status.cleaned(cleanedBytes, result.deleted_paths.length),
+          translations.vi.status.cleaned(cleanedBytes, result.deleted_paths.length),
+        );
+      }
+      await refreshAll();
+    } catch (error) {
+      setBlockedSelection(null);
       setStatusText(getErrorMessage(error, translations.en.status.cleanupFailed), getErrorMessage(error, translations.vi.status.cleanupFailed));
     } finally {
       setCleaning(false);
@@ -424,7 +516,149 @@ export default function App() {
           {tab === "issues" && <IssueHub copy={copy.issues} language={language} />}
         </section>
       </div>
+      {blockedSelection && (
+        <SafetyDialog
+          iconSrc={normalFrame}
+          item={blockedSelection}
+          language={language}
+          busy={busy}
+          onClose={() => setBlockedSelection(null)}
+          onForceClean={() => handleForceClean(blockedSelection)}
+        />
+      )}
     </main>
+  );
+}
+
+function SafetyDialog({
+  iconSrc,
+  item,
+  language,
+  busy,
+  onClose,
+  onForceClean,
+}: {
+  iconSrc: string;
+  item: BlockedSelection;
+  language: Language;
+  busy: boolean;
+  onClose: () => void;
+  onForceClean: () => Promise<void>;
+}) {
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [forceTriggered, setForceTriggered] = useState(false);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  useEffect(() => {
+    if (countdown === null) return;
+    if (countdown <= 0) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setCountdown((current) => current === null ? null : current - 1);
+    }, 1000);
+
+    return () => window.clearTimeout(timer);
+  }, [countdown]);
+
+  const isVi = language === "vi";
+  const countdownActive = countdown !== null && countdown > 0;
+  const countdownFinished = countdown === 0;
+  const overrideStarted = countdown !== null || forceTriggered;
+
+  function handleForceButtonClick() {
+    if (countdownFinished) {
+      setForceTriggered(true);
+      void onForceClean();
+      return;
+    }
+
+    setCountdown(3);
+  }
+
+  return (
+    <div
+      className="safety-modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section className="safety-modal" role="dialog" aria-modal="true" aria-labelledby="safety-dialog-title">
+        <div className="safety-modal-ribbon" />
+        <div className="safety-modal-header">
+          <div className="safety-modal-icon">
+            <img src={iconSrc} alt="" draggable={false} />
+          </div>
+          <div className="min-w-0">
+            <p className="safety-modal-kicker">{isVi ? "Warden đã chặn" : "Blocked by warden"}</p>
+            <h2 id="safety-dialog-title" className="safety-modal-title">
+              {isVi ? "Giữ nguyên mục này" : "This item stays untouched"}
+            </h2>
+          </div>
+          <button className="safety-modal-close" type="button" onClick={onClose} aria-label={isVi ? "Đóng cảnh báo" : "Close warning"}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="safety-modal-body">
+          <div className="safety-modal-callout">
+            <AlertTriangle size={18} />
+            <p>
+              {isVi
+                ? `Mục "${item.label}" đang được đánh dấu "${item.safety}". Nó có thể chứa chat, project, phiên làm việc, cài đặt hoặc dữ liệu workspace của Claude.`
+                : `"${item.label}" is marked "${item.safety}". It may contain chats, projects, sessions, settings, or Claude workspace data.`}
+            </p>
+          </div>
+
+          <div>
+            <p className="safety-modal-path-label">{isVi ? "Đường dẫn bị giữ lại" : "Path left untouched"}</p>
+            <code className="safety-modal-path">{item.path}</code>
+          </div>
+        </div>
+
+        <div className="safety-modal-footer">
+          <button className="secondary-button safety-modal-action" type="button" onClick={onClose} disabled={busy}>
+            {isVi ? "Đã hiểu" : "Understood"}
+          </button>
+          <button
+            className="danger-button safety-modal-force"
+            type="button"
+            onClick={handleForceButtonClick}
+            disabled={busy || forceTriggered || countdownActive}
+            autoFocus
+          >
+            {forceTriggered
+              ? isVi
+                ? "Đang xóa..."
+                : "Deleting..."
+              : countdownActive
+              ? isVi
+                ? `Chờ ${countdown}s`
+                : `Wait ${countdown}s`
+              : countdownFinished
+              ? isVi
+                ? "Bấm lần nữa để xóa"
+                : "Click again to delete"
+              : overrideStarted
+              ? isVi
+                ? "Bấm lần nữa để xóa"
+                : "Click again to delete"
+              : isVi
+                ? "Tôi hiểu và vẫn xóa"
+                : "I understand and delete"}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
