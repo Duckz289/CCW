@@ -124,4 +124,8 @@ Windows outputs:
 
 ## License
 
-See the repository license, if provided.
+This project is licensed under the [MIT License](LICENSE).
+
+## Giấy phép
+
+Dự án này được phát hành theo [giấy phép MIT](LICENSE).
