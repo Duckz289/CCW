@@ -46,6 +46,7 @@ export const translations = {
       cleanBlockedBackground: "Claude is still running in the background and may be locking cache files. Fully quit Claude from the tray or Task Manager, then scan again.",
       cleaned: (bytes: string, count: number) => `Cleaned ${bytes} from ${count} location(s).`,
       cleanedWithErrors: (bytes: string, count: number, errors: number) => `Cleaned ${bytes} from ${count} location(s), with ${errors} error(s).`,
+      cleanedWithIssues: (bytes: string, count: number, errors: number, skipped: number) => `Cleanup finished: ${bytes} from ${count} location(s); ${errors} error(s) and ${skipped} skipped. Open the report for details.`,
       cleanupFailed: "Cleanup failed",
       previewFailed: "Cleanup preview failed",
       previewReady: "Preview ready. Review every path before confirming.",
@@ -57,6 +58,13 @@ export const translations = {
       exportFailed: "Export failed",
       exportFolderOpened: "Opened the folder containing the exported file.",
       exportFolderFailed: "Could not open the export folder.",
+      settingsSaved: "Automation settings saved.",
+      quarantineRefreshed: "Quarantine list refreshed.",
+      expiredQuarantineCleared: (count: number) => `Cleared ${count} expired quarantine entr${count === 1 ? "y" : "ies"}.`,
+      quarantineRestored: "Quarantine entry restored.",
+      quarantineDeleted: "Quarantine entry permanently deleted.",
+      analysisCompleted: "Storage analysis is ready.",
+      fileManagerOpened: "Opened the selected location in the file manager.",
     },
     warnings: {
       claudeRunning:
@@ -302,6 +310,7 @@ export const translations = {
       cleanBlockedBackground: "Claude vẫn đang chạy nền và có thể đang khóa file cache. Hãy thoát hẳn Claude từ tray hoặc Task Manager rồi quét lại.",
       cleaned: (bytes: string, count: number) => `Đã dọn ${bytes} ở ${count} vị trí.`,
       cleanedWithErrors: (bytes: string, count: number, errors: number) => `Đã dọn ${bytes} ở ${count} vị trí, còn ${errors} lỗi.`,
+      cleanedWithIssues: (bytes: string, count: number, errors: number, skipped: number) => `Đã hoàn tất dọn ${bytes} ở ${count} vị trí; có ${errors} lỗi và ${skipped} vị trí được giữ nguyên. Mở báo cáo để xem lý do.`,
       cleanupFailed: "Dọn dẹp thất bại",
       previewFailed: "Không tạo được bản xem trước",
       previewReady: "Bản xem trước đã sẵn sàng. Hãy kiểm tra từng đường dẫn trước khi xác nhận.",
@@ -313,6 +322,13 @@ export const translations = {
       exportFailed: "Xuất báo cáo thất bại",
       exportFolderOpened: "Đã mở thư mục chứa tệp đã xuất.",
       exportFolderFailed: "Không mở được thư mục chứa tệp xuất.",
+      settingsSaved: "Đã lưu cài đặt tự động.",
+      quarantineRefreshed: "Đã làm mới danh sách cách ly.",
+      expiredQuarantineCleared: (count: number) => `Đã xóa ${count} mục cách ly hết hạn.`,
+      quarantineRestored: "Đã khôi phục mục cách ly.",
+      quarantineDeleted: "Đã xóa vĩnh viễn mục cách ly.",
+      analysisCompleted: "Đã hoàn tất phân tích dung lượng.",
+      fileManagerOpened: "Đã mở vị trí đã chọn trong trình quản lý tệp.",
     },
     warnings: {
       claudeRunning:
@@ -523,6 +539,8 @@ export const translations = {
 } as const;
 
 const dynamicTextVi: Record<string, string> = {
+  "VM bundle contains only in-progress .tmp/.partial artifacts. CCW left them untouched. Fully quit Claude/Cowork and retry after the bundle finishes rebuilding.": "Gói VM chỉ chứa tệp .tmp/.partial đang tạo dở. CCW giữ nguyên để an toàn. Hãy thoát hẳn Claude/Cowork và thử lại sau khi VM tạo xong.",
+  "VM bundle contains no approved rebuildable artifacts. CCW left it untouched for safety.": "Gói VM không có tệp có thể tái tạo đã được CCW phê duyệt. CCW giữ nguyên để đảm bảo an toàn.",
   "Cache data that Claude can rebuild after cleanup.": "Dữ liệu cache mà Claude có thể tạo lại sau khi dọn.",
   "Rebuildable Claude VM runtime artifact. Claude can recreate it after cleanup.": "Tệp runtime VM có thể tái tạo; Claude có thể tạo lại sau khi dọn.",
   "Protected Claude workspace, session, identity, configuration, browser, project, or application-state data.": "Dữ liệu workspace, phiên làm việc, định danh, cấu hình, trình duyệt, dự án hoặc trạng thái ứng dụng Claude được bảo vệ.",

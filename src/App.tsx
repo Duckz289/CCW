@@ -290,9 +290,10 @@ export default function App() {
       setCleanResult(result);
       const cleanedBytes = formatBytes(result.actual_reclaimed_bytes);
       const completed = result.paths_cleaned.length;
+      const skipped = result.paths_skipped.length;
       setStatusText(
-        result.errors.length > 0 ? translations.en.status.cleanedWithErrors(cleanedBytes, completed, result.errors.length) : translations.en.status.cleaned(cleanedBytes, completed),
-        result.errors.length > 0 ? translations.vi.status.cleanedWithErrors(cleanedBytes, completed, result.errors.length) : translations.vi.status.cleaned(cleanedBytes, completed),
+        result.errors.length > 0 || skipped > 0 ? translations.en.status.cleanedWithIssues(cleanedBytes, completed, result.errors.length, skipped) : translations.en.status.cleaned(cleanedBytes, completed),
+        result.errors.length > 0 || skipped > 0 ? translations.vi.status.cleanedWithIssues(cleanedBytes, completed, result.errors.length, skipped) : translations.vi.status.cleaned(cleanedBytes, completed),
       );
       await refreshAll();
     } catch (error) {
@@ -339,8 +340,9 @@ export default function App() {
   async function clearExpiredEntries() {
     setBusy(true);
     try {
-      await clearExpiredQuarantine();
+      const cleared = await clearExpiredQuarantine();
       setQuarantine(await listQuarantineEntries());
+      setStatusText(translations.en.status.expiredQuarantineCleared(cleared.length), translations.vi.status.expiredQuarantineCleared(cleared.length));
     } catch (error) {
       setStatusText(getErrorMessage(error, translations.en.status.actionFailed), getErrorMessage(error, translations.vi.status.actionFailed));
     } finally {
@@ -360,6 +362,7 @@ export default function App() {
   async function revealPath(path: string) {
     try {
       await openInFileManager(path);
+      setStatusText(translations.en.status.fileManagerOpened, translations.vi.status.fileManagerOpened);
     } catch (error) {
       setStatusText(getErrorMessage(error, translations.en.status.actionFailed), getErrorMessage(error, translations.vi.status.actionFailed));
     }
@@ -371,6 +374,7 @@ export default function App() {
     try {
       const saved = await saveSchedulerSettings(next);
       setSettings(saved);
+      setStatusText(translations.en.status.settingsSaved, translations.vi.status.settingsSaved);
     } catch (error) {
       setSettings(previous);
       setStatusText(getErrorMessage(error, translations.en.status.actionFailed), getErrorMessage(error, translations.vi.status.actionFailed));
@@ -405,7 +409,7 @@ export default function App() {
               </div>
               <div>
                 <h1 className="text-2xl font-black tracking-normal text-text">{copy.appTitle}</h1>
-                <p className="mt-1 text-sm text-muted">{status[language]}</p>
+                <p className="mt-1 text-sm text-muted" aria-live="polite" role="status">{status[language]}</p>
               </div>
             </div>
 
@@ -545,6 +549,7 @@ export default function App() {
               requestedRoot={analysisRoot}
               copy={copy}
               onError={(message) => setStatusText(message, localizeDynamicText("vi", message))}
+              onNotice={(message) => setStatusText(message, localizeDynamicText("vi", message))}
             />
           )}
 
@@ -559,6 +564,7 @@ export default function App() {
                 busy={busy}
                 onRefresh={refreshQuarantine}
                 onError={(message) => setStatusText(message, localizeDynamicText("vi", message))}
+                onNotice={(message) => setStatusText(message, localizeDynamicText("vi", message))}
               />
             </div>
           )}

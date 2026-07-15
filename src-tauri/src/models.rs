@@ -139,6 +139,8 @@ pub struct PathCleanupOutcome {
     pub directories_removed: u64,
     pub locked_items: Vec<String>,
     pub errors: Vec<CleanupError>,
+    #[serde(default)]
+    pub skip_reason: Option<String>,
     pub quarantine_cleanup_id: Option<String>,
 }
 

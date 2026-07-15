@@ -21,7 +21,12 @@ struct RemoveStats {
     files_removed: u64,
     directories_removed: u64,
     errors: Vec<CleanupError>,
+    skip_reason: Option<String>,
 }
+
+const VM_BUNDLE_IN_PROGRESS_REASON: &str = "VM bundle contains only in-progress .tmp/.partial artifacts. CCW left them untouched. Fully quit Claude/Cowork and retry after the bundle finishes rebuilding.";
+const VM_BUNDLE_UNSUPPORTED_REASON: &str =
+    "VM bundle contains no approved rebuildable artifacts. CCW left it untouched for safety.";
 
 pub fn preview_cleanup(request: &CleanRequest) -> Result<CleanupPreview, String> {
     preview_cleanup_with_roots(request, &claude_roots())
@@ -74,6 +79,9 @@ fn preview_cleanup_with_roots(
                         inspection_errors.len(),
                         sanitize_path(&validated.canonical)
                     ));
+                }
+                if let Some(warning) = vm_bundle_skip_warning(&validated.canonical) {
+                    warnings.push(warning);
                 }
                 approved_canonical.push(validated.canonical.clone());
                 approved_paths.push(ApprovedPath {
@@ -183,6 +191,7 @@ pub fn perform_cleanup(
                         directories_removed: 0,
                         locked_items: Vec::new(),
                         errors: inspection_errors,
+                        skip_reason: None,
                         quarantine_cleanup_id: Some(entry.cleanup_id),
                     });
                 }
@@ -196,6 +205,7 @@ pub fn perform_cleanup(
                     directories_removed: 0,
                     locked_items: locked_paths(std::slice::from_ref(&error)),
                     errors: vec![error],
+                    skip_reason: None,
                     quarantine_cleanup_id: None,
                 }),
             }
@@ -258,6 +268,7 @@ pub fn perform_cleanup(
             directories_removed: removal.directories_removed,
             locked_items: locked_paths(&errors),
             errors,
+            skip_reason: removal.skip_reason,
             quarantine_cleanup_id: None,
         });
     }
@@ -361,6 +372,7 @@ fn failed_outcome(
             path: display,
             message,
         }],
+        skip_reason: None,
         quarantine_cleanup_id: None,
     }
 }
@@ -393,10 +405,26 @@ fn remove_approved_target(path: &Path) -> RemoveStats {
     if is_claude_vm_bundle_leaf(path) {
         match fs::read_dir(path) {
             Ok(entries) => {
+                let mut found_approved_artifact = false;
+                let mut found_in_progress_artifact = false;
                 for entry in entries.flatten() {
-                    if is_rebuildable_vm_bundle_artifact(&entry.path()) {
-                        remove_tree(&entry.path(), &mut stats);
+                    let artifact = entry.path();
+                    if is_rebuildable_vm_bundle_artifact(&artifact) {
+                        found_approved_artifact = true;
+                        remove_tree(&artifact, &mut stats);
+                    } else if is_in_progress_vm_artifact(&artifact) {
+                        found_in_progress_artifact = true;
                     }
+                }
+                if !found_approved_artifact {
+                    stats.skip_reason = Some(
+                        if found_in_progress_artifact {
+                            VM_BUNDLE_IN_PROGRESS_REASON
+                        } else {
+                            VM_BUNDLE_UNSUPPORTED_REASON
+                        }
+                        .to_string(),
+                    );
                 }
             }
             Err(error) => {
@@ -425,6 +453,29 @@ fn remove_approved_target(path: &Path) -> RemoveStats {
             .push(io_error(path, &error, CleanupErrorCategory::ReadFailed)),
     }
     stats
+}
+
+fn vm_bundle_skip_warning(path: &Path) -> Option<String> {
+    if !is_claude_vm_bundle_leaf(path) {
+        return None;
+    }
+    let entries = fs::read_dir(path).ok()?;
+    if entries
+        .flatten()
+        .any(|entry| is_in_progress_vm_artifact(&entry.path()))
+    {
+        Some(VM_BUNDLE_IN_PROGRESS_REASON.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_in_progress_vm_artifact(path: &Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy().to_ascii_lowercase();
+    name.ends_with(".tmp") || name.contains(".partial")
 }
 
 fn remove_tree(path: &Path, stats: &mut RemoveStats) {
@@ -585,6 +636,30 @@ mod tests {
         }
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn in_progress_vm_bundle_is_left_untouched_with_a_reason() {
+        let root = std::env::temp_dir().join(format!("ccw-vm-progress-{}", std::process::id()));
+        let bundle = root.join("vm_bundles").join("claudevm.bundle");
+        let pending = bundle.join("rootfs.vhdx.tmp");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(&pending, b"still building").unwrap();
+
+        let stats = remove_approved_target(&bundle);
+
+        assert_eq!(stats.files_removed, 0);
+        assert!(pending.exists());
+        assert_eq!(
+            stats.skip_reason.as_deref(),
+            Some(VM_BUNDLE_IN_PROGRESS_REASON)
+        );
+        assert_eq!(
+            vm_bundle_skip_warning(&bundle).as_deref(),
+            Some(VM_BUNDLE_IN_PROGRESS_REASON)
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(target_os = "windows")]

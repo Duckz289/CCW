@@ -93,6 +93,7 @@ export interface PathCleanupOutcome {
   directories_removed: number;
   locked_items: string[];
   errors: CleanupError[];
+  skip_reason?: string | null;
   quarantine_cleanup_id: string | null;
 }
 

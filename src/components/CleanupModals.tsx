@@ -170,6 +170,7 @@ export function CleanupReportModal({ result, copy, language, onClose }: { result
                     </span>
                   </div>
                   <p className="mt-2 text-xs text-muted">{formatBytes(outcome.actual_reclaimed_bytes)} · {outcome.files_removed.toLocaleString()} {copy.preview.files}</p>
+                  {outcome.skip_reason && <p className="mt-2 rounded bg-warn/10 p-2 text-xs text-warn">{localizeDynamicText(language, outcome.skip_reason)}</p>}
                   {outcome.errors.map((error) => <p key={`${error.path}-${error.message}`} className="mt-1 text-xs text-danger">{localizeDynamicText(language, error.message)}</p>)}
                 </div>
               ))}
