@@ -93,7 +93,7 @@ export function Treemap({ nodes, selectedPaths, onToggleNode, copy, language }: 
                     <span className="bg-panel/80 px-2 py-1 text-[11px] font-black uppercase tracking-wide">{copy.safety[node.safety]}</span>
                     {hasSelectedDescendants && (
                       <span className="bg-accent px-2 py-1 text-[11px] font-black uppercase tracking-wide text-panel">
-                        {language === "vi" ? "Đã chọn cache con" : "Child cache selected"}
+                        {copy.childSelected}
                       </span>
                     )}
                     <button
@@ -102,7 +102,7 @@ export function Treemap({ nodes, selectedPaths, onToggleNode, copy, language }: 
                         visuallySelected ? "text-accent" : node.safety === "Safe" ? "text-text" : "text-warn"
                       }`}
                       onClick={() => onToggleNode(node)}
-                      aria-label={`${visuallySelected ? "Remove" : "Select"} ${localizeDynamicText(language, node.label)}`}
+                      aria-label={`${visuallySelected ? copy.removePath : copy.selectPath} ${localizeDynamicText(language, node.label)}`}
                     >
                       {visuallySelected ? <Check size={16} /> : <Plus size={16} />}
                     </button>
@@ -111,9 +111,7 @@ export function Treemap({ nodes, selectedPaths, onToggleNode, copy, language }: 
                 <p className="mt-2 line-clamp-3 text-sm text-muted">{localizeDynamicText(language, node.description)}</p>
                 {hasSelectedDescendants && (
                   <p className="mt-2 text-sm font-black text-accent">
-                    {language === "vi"
-                      ? `Sẽ dọn ${formatBytes(selectedDescendantBytes)} cache an toàn bên trong. Folder cha được giữ nguyên.`
-                      : `${formatBytes(selectedDescendantBytes)} of safe child cache selected. Parent folder stays untouched.`}
+                    {copy.childSelection(formatBytes(selectedDescendantBytes))}
                   </p>
                 )}
               </div>
@@ -142,11 +140,7 @@ export function Treemap({ nodes, selectedPaths, onToggleNode, copy, language }: 
                             <div className="flex items-start justify-between gap-2">
                               <span className="min-w-0 break-words text-sm font-black text-text">{localizeDynamicText(language, child.label)}</span>
                               <span className="shrink-0 bg-panel/80 px-2 py-1 text-[10px] font-black uppercase tracking-wide">
-                                {childVisuallySelected && child.safety !== "Safe"
-                                  ? language === "vi"
-                                    ? "ĐÃ CHỌN CACHE"
-                                    : "CACHE SELECTED"
-                                  : copy.safety[child.safety]}
+                                {childVisuallySelected && child.safety !== "Safe" ? copy.childSelectedBadge : copy.safety[child.safety]}
                               </span>
                             </div>
                             <p className="mt-2 text-lg font-black text-text">{formatBytes(child.size_bytes)}</p>
@@ -155,9 +149,7 @@ export function Treemap({ nodes, selectedPaths, onToggleNode, copy, language }: 
                             </p>
                             {childSelectedDescendants.length > 0 && (
                               <p className="mt-2 text-xs font-black text-accent">
-                                {language === "vi"
-                                  ? `Dọn ${formatBytes(childSelectedBytes)} cache con.`
-                                  : `${formatBytes(childSelectedBytes)} child cache selected.`}
+                                {copy.childSelectionShort(formatBytes(childSelectedBytes))}
                               </p>
                             )}
                           </button>

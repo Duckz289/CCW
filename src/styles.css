@@ -192,6 +192,60 @@ button:disabled {
   .safety-modal-force {
     @apply min-w-44;
   }
+
+  .phase-modal {
+    @apply flex max-h-[92dvh] w-full max-w-[880px] flex-col overflow-hidden rounded-[28px] bg-panel text-text shadow-soft ring-1 ring-line/80;
+    animation: safety-modal-in 160ms ease-out both;
+  }
+
+  .phase-modal-header {
+    @apply flex items-start gap-4 border-b border-line/60 bg-panel2 px-5 py-5 md:px-6;
+  }
+
+  .phase-modal-scroll {
+    @apply min-h-0 flex-1 overflow-y-auto px-5 py-4 md:px-6;
+  }
+
+  .phase-modal-footer {
+    @apply flex flex-col-reverse justify-end gap-2 border-t border-line/60 bg-ink/70 px-5 py-4 sm:flex-row md:px-6;
+  }
+
+  .modal-list-section {
+    @apply rounded-[18px] border border-line/70 bg-ink/50 p-4;
+  }
+
+  .badge-safe {
+    @apply rounded bg-accent/15 px-2 py-1 text-xs font-black text-accent;
+  }
+
+  .badge-warn {
+    @apply rounded bg-warn/15 px-2 py-1 text-xs font-black text-warn;
+  }
+
+  .badge-danger {
+    @apply rounded bg-danger/15 px-2 py-1 text-xs font-black text-danger;
+  }
+}
+
+:where(button, input, select, a):focus-visible {
+  outline: 3px solid rgb(47 107 63 / 0.85);
+  outline-offset: 3px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 @keyframes safety-modal-in {

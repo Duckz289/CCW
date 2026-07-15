@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Frontend lint
+        run: npm run lint
+      - name: TypeScript check
+        run: npm run typecheck
+      - name: Frontend tests
+        run: npm run test
+      - name: Frontend build
+        run: npm run build
+      - name: Rust format
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+      - name: Rust check
+        working-directory: src-tauri
+        run: cargo check
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test

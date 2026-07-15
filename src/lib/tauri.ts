@@ -4,58 +4,56 @@ import type {
   CleanRequest,
   CleanResult,
   ClaudeActivity,
+  CleanupPreview,
+  FileTypeBreakdownResult,
   GrowthAlert,
+  LargestItemsResult,
+  QuarantineActionResult,
+  QuarantineEntry,
   ScanResult,
   SchedulerSettings,
+  VolumeStatus,
 } from "../types";
 
-const mockScan: ScanResult = {
+export function isTauri() {
+  return "__TAURI_INTERNALS__" in window;
+}
+
+export const mockScan: ScanResult = {
   platform: "preview",
   scanned_at: new Date().toISOString(),
-  total_bytes: 8.7 * 1024 ** 3,
-  claude_running: true,
-  claude_activity: "window",
+  total_bytes: 3.1 * 1024 ** 3,
+  claude_running: false,
+  claude_activity: "not_detected",
   warnings: ["Preview data is shown because the app is running outside Tauri."],
   roots: [
     {
       label: "Claude workspace bundles",
       path: "~/Library/Application Support/Claude/vm_bundles",
-      size_bytes: 6.4 * 1024 ** 3,
-      file_count: 13042,
-      dir_count: 832,
+      size_bytes: 1.8 * 1024 ** 3,
+      file_count: 3042,
+      dir_count: 212,
       exists: true,
-      safety: "Caution",
+      safety: "NotRecommended",
       default_cleanup: false,
-      description: "Workspace VM bundles. Active sessions may be using these files.",
+      description: "Protected workspace VM bundle container.",
       children: [
         {
           label: "Warm VM bundles",
           path: "~/Library/Application Support/Claude/vm_bundles/warm",
-          size_bytes: 4.9 * 1024 ** 3,
-          file_count: 9024,
-          dir_count: 412,
+          size_bytes: 1.2 * 1024 ** 3,
+          file_count: 2024,
+          dir_count: 112,
           exists: true,
           safety: "Safe",
-          default_cleanup: false,
-          description: "Prebuilt Cowork VM cache that Claude can recreate.",
-          children: [],
-        },
-        {
-          label: "Project bundle cache",
-          path: "~/Library/Application Support/Claude/vm_bundles/project",
-          size_bytes: 1.5 * 1024 ** 3,
-          file_count: 4018,
-          dir_count: 420,
-          exists: true,
-          safety: "Caution",
-          default_cleanup: false,
-          description: "Project-scoped bundle data. Review before deleting.",
+          default_cleanup: true,
+          description: "Prebuilt VM cache that Claude can recreate.",
           children: [],
         },
       ],
     },
     {
-      label: "Renderer Cache",
+      label: "Renderer cache",
       path: "~/Library/Application Support/Claude/Cache",
       size_bytes: 1.3 * 1024 ** 3,
       file_count: 4821,
@@ -66,93 +64,181 @@ const mockScan: ScanResult = {
       description: "Application cache that can be rebuilt.",
       children: [],
     },
-    {
-      label: "Code Cache",
-      path: "~/Library/Application Support/Claude/Code Cache",
-      size_bytes: 1.0 * 1024 ** 3,
-      file_count: 2931,
-      dir_count: 84,
-      exists: true,
-      safety: "Safe",
-      default_cleanup: true,
-      description: "Compiled renderer code cache.",
-      children: [],
-    },
   ],
 };
 
+const mockSettings: SchedulerSettings = {
+  enabled: false,
+  schedule_enabled: false,
+  schedule_frequency: "daily",
+  schedule_time: "02:00",
+  weekly_day: 1,
+  monthly_day: 1,
+  schedule_grace_minutes: 30,
+  threshold_enabled: false,
+  threshold_gb: 5,
+  disk_space_enabled: false,
+  monitored_volume: "",
+  minimum_free_gb: 10,
+  minimum_free_percent: null,
+  target_free_gb: 15,
+  cleanup_cooldown_hours: 6,
+  max_cleanup_bytes: 2 * 1024 ** 3,
+  notification_behavior: "in_app",
+  growth_alert_enabled: true,
+  growth_alert_gb_per_hour: 2,
+  clean_when_claude_running: false,
+  launch_at_login: false,
+  start_minimized: true,
+  scan_on_startup: true,
+  startup_cleanup_enabled: false,
+  startup_cleanup_delay_seconds: 30,
+  quarantine_retention_days: 7,
+};
+
 export async function scanCache(): Promise<ScanResult> {
-  if (!("__TAURI_INTERNALS__" in window)) return mockScan;
+  if (!isTauri()) return { ...mockScan, scanned_at: new Date().toISOString() };
   return invoke<ScanResult>("scan_cache");
 }
 
-export async function cleanCache(request: CleanRequest): Promise<CleanResult> {
-  return invoke<CleanResult>("clean_cache", { request });
+export async function previewCleanup(request: CleanRequest): Promise<CleanupPreview> {
+  if (!isTauri()) {
+    const flat = mockScan.roots.flatMap((root) => [root, ...root.children]);
+    const approved = flat.filter((node) => request.paths.includes(node.path) && node.safety !== "NotRecommended");
+    const rejected = flat.filter((node) => request.paths.includes(node.path) && node.safety === "NotRecommended");
+    return {
+      requested_paths: request.paths,
+      approved_paths: approved.map((node) => ({
+        path: node.path,
+        display_path: node.path,
+        safety: node.safety,
+        reason: node.description,
+        estimated_bytes: node.size_bytes,
+        estimated_file_count: node.file_count,
+        estimated_directory_count: node.dir_count,
+        requires_quarantine: node.safety === "Caution",
+      })),
+      rejected_paths: rejected.map((node) => ({
+        path: node.path,
+        display_path: node.path,
+        reason: node.description,
+        category: "protected_target",
+      })),
+      estimated_bytes: approved.reduce((sum, node) => sum + node.size_bytes, 0),
+      estimated_file_count: approved.reduce((sum, node) => sum + node.file_count, 0),
+      estimated_directory_count: approved.reduce((sum, node) => sum + node.dir_count, 0),
+      protected_items_detected: rejected.length > 0,
+      claude_activity: mockScan.claude_activity,
+      cleanup_blocked: false,
+      warnings: [],
+      generated_at: new Date().toISOString(),
+    };
+  }
+  return invoke<CleanupPreview>("preview_cleanup", { request });
 }
 
-export async function forceCleanCache(request: CleanRequest): Promise<CleanResult> {
-  if (!("__TAURI_INTERNALS__" in window)) {
+export async function cleanCache(request: CleanRequest): Promise<CleanResult> {
+  if (!isTauri()) {
+    const preview = await previewCleanup(request);
     return {
-      cleaned_bytes: 0,
-      deleted_paths: request.paths,
-      skipped_paths: [],
+      estimated_bytes: preview.estimated_bytes,
+      actual_reclaimed_bytes: preview.estimated_bytes,
+      files_removed: preview.estimated_file_count,
+      directories_removed: preview.estimated_directory_count,
+      paths_cleaned: preview.approved_paths.map((path) => path.display_path),
+      paths_skipped: preview.rejected_paths.map((path) => path.display_path),
+      locked_items: [],
       errors: [],
-      remaining_bytes: mockScan.total_bytes,
+      outcomes: preview.approved_paths.map((path) => ({
+        path: path.path,
+        display_path: path.display_path,
+        status: path.requires_quarantine ? "quarantined" : "fully_cleaned",
+        estimated_bytes: path.estimated_bytes,
+        actual_reclaimed_bytes: path.requires_quarantine ? 0 : path.estimated_bytes,
+        files_removed: path.requires_quarantine ? 0 : path.estimated_file_count,
+        directories_removed: path.requires_quarantine ? 0 : path.estimated_directory_count,
+        locked_items: [],
+        errors: [],
+        quarantine_cleanup_id: path.requires_quarantine ? "preview-entry" : null,
+      })),
+      duration_ms: 120,
+      trigger: request.trigger,
+      quarantine_used: preview.approved_paths.some((path) => path.requires_quarantine),
+      remaining_bytes: 0,
       cleaned_at: new Date().toISOString(),
     };
   }
-  return invoke<CleanResult>("force_clean_cache", { request });
+  return invoke<CleanResult>("clean_cache", { request });
 }
 
 export async function getSchedulerSettings(): Promise<SchedulerSettings> {
-  if (!("__TAURI_INTERNALS__" in window)) {
-    return {
-      enabled: false,
-      schedule_enabled: true,
-      schedule_time: "02:00",
-      threshold_enabled: true,
-      threshold_gb: 5,
-      growth_alert_enabled: true,
-      growth_alert_gb_per_hour: 2,
-      clean_when_claude_running: false,
-    };
-  }
+  if (!isTauri()) return mockSettings;
   return invoke<SchedulerSettings>("get_scheduler_settings");
 }
 
 export async function saveSchedulerSettings(settings: SchedulerSettings): Promise<SchedulerSettings> {
-  if (!("__TAURI_INTERNALS__" in window)) return settings;
+  if (!isTauri()) return settings;
   return invoke<SchedulerSettings>("save_scheduler_settings", { settings });
 }
 
 export async function getCleanHistory(): Promise<CleanHistoryEntry[]> {
-  if (!("__TAURI_INTERNALS__" in window)) return [];
+  if (!isTauri()) return [];
   return invoke<CleanHistoryEntry[]>("get_clean_history");
 }
 
-export async function getClaudeRunning(): Promise<boolean> {
-  if (!("__TAURI_INTERNALS__" in window)) return mockScan.claude_running;
-  return invoke<boolean>("get_claude_running");
-}
-
 export async function getClaudeActivity(): Promise<ClaudeActivity> {
-  if (!("__TAURI_INTERNALS__" in window)) return mockScan.claude_activity;
+  if (!isTauri()) return mockScan.claude_activity;
   return invoke<ClaudeActivity>("get_claude_activity");
 }
 
 export async function evaluateGrowthAlert(): Promise<GrowthAlert> {
-  if (!("__TAURI_INTERNALS__" in window)) {
-    return {
-      active: true,
-      gb_per_hour: 3.4,
-      baseline_gb_per_hour: 0.7,
-      message: "Cache is growing faster than the preview baseline.",
-    };
-  }
+  if (!isTauri()) return { active: false, gb_per_hour: 0.4, baseline_gb_per_hour: 0.3, message: "Growth rate is within the learned baseline." };
   return invoke<GrowthAlert>("evaluate_growth_alert");
 }
 
-export async function exportReport(): Promise<string> {
-  if (!("__TAURI_INTERNALS__" in window)) return "Preview mode does not write reports.";
-  return invoke<string>("export_report");
+export async function listQuarantineEntries(): Promise<QuarantineEntry[]> {
+  if (!isTauri()) return [];
+  return invoke<QuarantineEntry[]>("list_quarantine_entries");
+}
+
+export async function restoreQuarantineEntry(cleanupId: string): Promise<QuarantineActionResult> {
+  return invoke<QuarantineActionResult>("restore_quarantine_entry", { cleanupId });
+}
+
+export async function permanentlyDeleteQuarantineEntry(cleanupId: string): Promise<QuarantineActionResult> {
+  return invoke<QuarantineActionResult>("permanently_delete_quarantine_entry", { cleanupId });
+}
+
+export async function clearExpiredQuarantine(): Promise<QuarantineActionResult[]> {
+  if (!isTauri()) return [];
+  return invoke<QuarantineActionResult[]>("clear_expired_quarantine");
+}
+
+export async function openInFileManager(path: string): Promise<void> {
+  if (!isTauri()) return;
+  return invoke<void>("open_in_file_manager", { path });
+}
+
+export async function getLargestItems(root: string, limit = 20): Promise<LargestItemsResult> {
+  if (!isTauri()) return { root, files: [], directories: [], warnings: [], generated_at: new Date().toISOString() };
+  return invoke<LargestItemsResult>("get_largest_items", { root, limit });
+}
+
+export async function getFileTypeBreakdown(root: string): Promise<FileTypeBreakdownResult> {
+  if (!isTauri()) return { root, total_bytes: 0, categories: [], warnings: [], generated_at: new Date().toISOString() };
+  return invoke<FileTypeBreakdownResult>("get_file_type_breakdown", { root });
+}
+
+export async function getVolumeStatus(volume: string): Promise<VolumeStatus> {
+  return invoke<VolumeStatus>("get_volume_status", { volume });
+}
+
+export async function exportReport(unsanitized = false): Promise<string> {
+  if (!isTauri()) return "Preview mode does not write reports.";
+  return invoke<string>("export_report", { unsanitized });
+}
+
+export async function openExportLocation(path: string): Promise<void> {
+  if (!isTauri()) return;
+  return invoke<void>("open_export_location", { path });
 }

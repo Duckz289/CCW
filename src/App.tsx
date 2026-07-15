@@ -1,7 +1,9 @@
 import {
   AlertTriangle,
+  Clipboard,
   Clock,
   Download,
+  ExternalLink,
   FolderSearch,
   RefreshCw,
   Settings,
@@ -10,16 +12,20 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import normalFrame from "../action/NORMAL.png";
 import { IssueHub } from "./components/IssueHub";
 import { Mascot } from "./components/Mascot";
 import { Treemap } from "./components/Treemap";
-import { cleanCache, evaluateGrowthAlert, exportReport, forceCleanCache, getClaudeActivity, getCleanHistory, getSchedulerSettings, saveSchedulerSettings, scanCache } from "./lib/tauri";
+import { CleanupPreviewModal, CleanupReportModal, ExportSuccessModal } from "./components/CleanupModals";
+import { AnalysisPanel, QuarantinePanel } from "./components/PowerPanels";
+import { cleanCache, clearExpiredQuarantine, evaluateGrowthAlert, exportReport, getClaudeActivity, getCleanHistory, getSchedulerSettings, isTauri, listQuarantineEntries, openExportLocation, openInFileManager, previewCleanup, saveSchedulerSettings, scanCache } from "./lib/tauri";
 import { formatBytes, formatDate } from "./lib/format";
-import type { CacheNode, ClaudeActivity, CleanHistoryEntry, GrowthAlert, ScanResult, SchedulerSettings } from "./types";
+import { cleanableDescendants, containsNodePath, defaultSafeSelection, flattenNodes, hasNonZeroSize, toggleExactPath } from "./lib/selection";
+import type { CacheNode, ClaudeActivity, CleanHistoryEntry, CleanRequest, CleanResult, CleanupPreview, GrowthAlert, QuarantineEntry, ScanResult, SchedulerSettings } from "./types";
 import { languageLabels, localizeDynamicText, translations, type Language } from "./i18n";
 
-type Tab = "overview" | "history" | "automation" | "issues";
+type Tab = "overview" | "analysis" | "quarantine" | "history" | "automation" | "issues";
 type StatusText = Record<Language, string>;
 type Copy = (typeof translations)[Language];
 type BlockedSelection = {
@@ -27,23 +33,10 @@ type BlockedSelection = {
   path: string;
   safety: string;
 };
-
-function flattenNodes(nodes: CacheNode[]): CacheNode[] {
-  return nodes.flatMap((node) => [node, ...flattenNodes(node.children)]);
-}
-
-function hasNonZeroSize(node: CacheNode): boolean {
-  return node.exists && node.size_bytes > 0;
-}
-
-function defaultSafeSelection(scan: ScanResult | null): Set<string> {
-  if (!scan) return new Set();
-  return new Set(flattenNodes(scan.roots).filter((node) => node.default_cleanup && hasNonZeroSize(node)).map((node) => node.path));
-}
-
-function containsNodePath(parent: CacheNode, path: string): boolean {
-  return parent.children.some((child) => child.path === path || containsNodePath(child, path));
-}
+type ExportedReport = {
+  path: string;
+  diagnostic: boolean;
+};
 
 export default function App() {
   const [language, setLanguage] = useState<Language>(() => {
@@ -56,6 +49,13 @@ export default function App() {
   const [settings, setSettings] = useState<SchedulerSettings | null>(null);
   const [history, setHistory] = useState<CleanHistoryEntry[]>([]);
   const [growth, setGrowth] = useState<GrowthAlert | null>(null);
+  const [quarantine, setQuarantine] = useState<QuarantineEntry[]>([]);
+  const [preview, setPreview] = useState<CleanupPreview | null>(null);
+  const [pendingRequest, setPendingRequest] = useState<CleanRequest | null>(null);
+  const [cleanResult, setCleanResult] = useState<CleanResult | null>(null);
+  const [exportedReport, setExportedReport] = useState<ExportedReport | null>(null);
+  const [openingExportFolder, setOpeningExportFolder] = useState(false);
+  const [analysisRoot, setAnalysisRoot] = useState("");
   const [status, setStatus] = useState<StatusText>({ en: translations.en.status.ready, vi: translations.vi.status.ready });
   const [blockedSelection, setBlockedSelection] = useState<BlockedSelection | null>(null);
   const [busy, setBusy] = useState(false);
@@ -74,16 +74,18 @@ export default function App() {
   async function refreshAll() {
     setBusy(true);
     try {
-      const [nextScan, nextSettings, nextHistory, nextGrowth] = await Promise.all([
+      const [nextScan, nextSettings, nextHistory, nextGrowth, nextQuarantine] = await Promise.all([
         scanCache(),
         getSchedulerSettings(),
         getCleanHistory(),
         evaluateGrowthAlert(),
+        listQuarantineEntries(),
       ]);
       setScan(nextScan);
       setSettings(nextSettings);
       setHistory(nextHistory);
       setGrowth(nextGrowth);
+      setQuarantine(nextQuarantine);
       setSelectedPaths(defaultSafeSelection(nextScan));
       const scannedAt = formatDate(nextScan.scanned_at);
       setStatusText(translations.en.status.scanned(scannedAt), translations.vi.status.scanned(scannedAt));
@@ -91,6 +93,27 @@ export default function App() {
       setStatusText(error instanceof Error ? error.message : translations.en.status.scanFailed, error instanceof Error ? error.message : translations.vi.status.scanFailed);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function loadInitialState() {
+    try {
+      const initialSettings = await getSchedulerSettings();
+      if (initialSettings.scan_on_startup) {
+        await refreshAll();
+        return;
+      }
+      const [nextHistory, nextGrowth, nextQuarantine] = await Promise.all([
+        getCleanHistory(),
+        evaluateGrowthAlert(),
+        listQuarantineEntries(),
+      ]);
+      setSettings(initialSettings);
+      setHistory(nextHistory);
+      setGrowth(nextGrowth);
+      setQuarantine(nextQuarantine);
+    } catch (error) {
+      setStatusText(getErrorMessage(error, translations.en.status.scanFailed), getErrorMessage(error, translations.vi.status.scanFailed));
     }
   }
 
@@ -104,8 +127,44 @@ export default function App() {
   }
 
   useEffect(() => {
-    void refreshAll();
-  }, []);
+    void loadInitialState();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- intentional one-time startup load
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    void (async () => {
+      const scanUnlisten = await listen("scan-requested", () => void refreshAll());
+      const cleanupUnlisten = await listen<CleanResult>("cleanup-completed", (event) => {
+        setCleanResult(event.payload);
+        setTab("overview");
+        void refreshAll();
+      });
+      const cleanUnlisten = await listen("safe-cleanup-requested", () => {
+        void (async () => {
+          const [nextScan, nextSettings] = await Promise.all([scanCache(), getSchedulerSettings()]);
+          const paths = Array.from(defaultSafeSelection(nextScan));
+          setScan(nextScan);
+          setSettings(nextSettings);
+          setSelectedPaths(new Set(paths));
+          setTab("overview");
+          await openCleanupPreview(paths, "tray", nextSettings);
+        })();
+      });
+      if (disposed) {
+        scanUnlisten();
+        cleanupUnlisten();
+        cleanUnlisten();
+      } else {
+        unlisteners.push(scanUnlisten, cleanupUnlisten, cleanUnlisten);
+      }
+    })();
+    return () => {
+      disposed = true;
+      unlisteners.forEach((unlisten) => unlisten());
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- listeners are registered once and read current backend state
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -146,44 +205,20 @@ export default function App() {
   }, [visibleNodes]);
 
   function guardCleanupSelection(node: CacheNode) {
-    if (selectedPaths.has(node.path) || node.safety === "Safe") return true;
+    if (selectedPaths.has(node.path) || node.safety !== "NotRecommended") return true;
 
     const label = localizeDynamicText(language, node.label);
     const safety = copy.treemap.safety[node.safety];
     setBlockedSelection({ label, path: node.path, safety });
     setStatusText(
-      "Only Safe paths can be selected for cleanup. This item may contain chats, projects, sessions, settings, or Claude workspace data.",
-      "Chỉ những mục đánh dấu An toàn mới được chọn để dọn. Mục này có thể chứa chat, project, phiên làm việc, cài đặt hoặc dữ liệu workspace của Claude.",
+      translations.en.status.protectedBlocked,
+      translations.vi.status.protectedBlocked,
     );
     return false;
   }
 
-  function confirmRiskySelection(node: CacheNode) {
-    return guardCleanupSelection(node);
-    if (selectedPaths.has(node.path)) return true;
-    if (node.safety !== "Safe") {
-      setStatusText(
-        "Only Safe paths can be selected for cleanup. This location may contain workspace, session, or settings data.",
-        "Chi duong dan danh dau An toan moi duoc chon de don. Muc nay co the chua du lieu workspace, phien, hoac cai dat.",
-      );
-      return false;
-    }
-    if (node.safety === "Safe") return true;
-    const label = localizeDynamicText(language, node.label);
-    const safety = copy.treemap.safety[node.safety];
-    return window.confirm(
-      language === "vi"
-        ? `Mục "${label}" được đánh dấu ${safety}. Chọn mục này sẽ đưa toàn bộ đường dẫn đó vào danh sách dọn. Bạn muốn tiếp tục?`
-        : `"${label}" is marked ${safety}. Selecting it adds the whole path to the cleanup list. Continue?`,
-    );
-  }
-
-  function cleanableDescendants(node: CacheNode) {
-    return flattenNodes(node.children).filter((child) => child.exists && child.size_bytes > 0 && child.safety === "Safe" && child.default_cleanup);
-  }
-
   function toggleNode(node: CacheNode) {
-    if (!selectedPaths.has(node.path) && node.safety !== "Safe") {
+    if (!selectedPaths.has(node.path) && node.safety === "NotRecommended") {
       const descendants = cleanableDescendants(node);
       if (descendants.length > 0) {
         setSelectedPaths((current) => {
@@ -214,48 +249,51 @@ export default function App() {
       }
     }
 
-    if (!confirmRiskySelection(node)) return;
-    setSelectedPaths((current) => {
-      const next = new Set(current);
-      if (next.has(node.path)) {
-        next.delete(node.path);
-      } else {
-        // Keep cleanup targets exact: selecting a parent replaces selected descendants,
-        // and selecting a child clears any selected ancestor to avoid double counting.
-        for (const path of current) {
-          const selectedNode = nodeByPath.get(path);
-          if (selectedNode && (containsNodePath(node, path) || containsNodePath(selectedNode, node.path))) {
-            next.delete(path);
-          }
-        }
-        next.add(node.path);
-      }
-      return next;
-    });
+    if (!guardCleanupSelection(node)) return;
+    setSelectedPaths((current) => toggleExactPath(current, node, nodeByPath));
+  }
+
+  async function openCleanupPreview(paths: string[], trigger: CleanRequest["trigger"], activeSettings = settings) {
+    if (paths.length === 0) return;
+    const request: CleanRequest = {
+      paths,
+      allow_when_running: !!activeSettings?.clean_when_claude_running,
+      quarantine_caution: false,
+      trigger,
+    };
+    setBusy(true);
+    try {
+      const nextPreview = await previewCleanup(request);
+      setPendingRequest(request);
+      setPreview(nextPreview);
+      setStatusText(translations.en.status.previewReady, translations.vi.status.previewReady);
+    } catch (error) {
+      setStatusText(getErrorMessage(error, translations.en.status.previewFailed), getErrorMessage(error, translations.vi.status.previewFailed));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleClean() {
     if (!scan || selectedPaths.size === 0) return;
-    if (claudeBlocksCleanup(scan.claude_activity) && !settings?.clean_when_claude_running) {
+    await openCleanupPreview(Array.from(selectedPaths), "manual");
+  }
+
+  async function confirmCleanup(quarantineCaution: boolean) {
+    if (!pendingRequest) return;
+    setBusy(true);
+    setCleaning(true);
+    try {
+      const result = await cleanCache({ ...pendingRequest, quarantine_caution: quarantineCaution });
+      setPreview(null);
+      setPendingRequest(null);
+      setCleanResult(result);
+      const cleanedBytes = formatBytes(result.actual_reclaimed_bytes);
+      const completed = result.paths_cleaned.length;
       setStatusText(
-        cleanupBlockedMessage(translations.en, scan.claude_activity),
-        cleanupBlockedMessage(translations.vi, scan.claude_activity),
+        result.errors.length > 0 ? translations.en.status.cleanedWithErrors(cleanedBytes, completed, result.errors.length) : translations.en.status.cleaned(cleanedBytes, completed),
+        result.errors.length > 0 ? translations.vi.status.cleanedWithErrors(cleanedBytes, completed, result.errors.length) : translations.vi.status.cleaned(cleanedBytes, completed),
       );
-      return;
-    }
-    setBusy(true);
-    setCleaning(true);
-    try {
-      const result = await cleanCache({ paths: Array.from(selectedPaths), allow_when_running: !!settings?.clean_when_claude_running });
-      const cleanedBytes = formatBytes(result.cleaned_bytes);
-      if (result.errors.length > 0) {
-        setStatusText(
-          translations.en.status.cleanedWithErrors(cleanedBytes, result.deleted_paths.length, result.errors.length),
-          translations.vi.status.cleanedWithErrors(cleanedBytes, result.deleted_paths.length, result.errors.length),
-        );
-      } else {
-        setStatusText(translations.en.status.cleaned(cleanedBytes, result.deleted_paths.length), translations.vi.status.cleaned(cleanedBytes, result.deleted_paths.length));
-      }
       await refreshAll();
     } catch (error) {
       setStatusText(getErrorMessage(error, translations.en.status.cleanupFailed), getErrorMessage(error, translations.vi.status.cleanupFailed));
@@ -265,51 +303,90 @@ export default function App() {
     }
   }
 
-  async function handleForceClean(item: BlockedSelection) {
-    setBusy(true);
-    setCleaning(true);
+  async function handleExport(unsanitized = false) {
+    if (unsanitized && !window.confirm(copy.status.unsanitizedWarning)) return;
     try {
-      const result = await forceCleanCache({ paths: [item.path], allow_when_running: true });
-      const cleanedBytes = formatBytes(result.cleaned_bytes);
-      setBlockedSelection(null);
-      if (result.errors.length > 0) {
-        setStatusText(
-          translations.en.status.cleanedWithErrors(cleanedBytes, result.deleted_paths.length, result.errors.length),
-          translations.vi.status.cleanedWithErrors(cleanedBytes, result.deleted_paths.length, result.errors.length),
-        );
-      } else {
-        setStatusText(
-          translations.en.status.cleaned(cleanedBytes, result.deleted_paths.length),
-          translations.vi.status.cleaned(cleanedBytes, result.deleted_paths.length),
-        );
-      }
-      await refreshAll();
-    } catch (error) {
-      setBlockedSelection(null);
-      setStatusText(getErrorMessage(error, translations.en.status.cleanupFailed), getErrorMessage(error, translations.vi.status.cleanupFailed));
-    } finally {
-      setCleaning(false);
-      setBusy(false);
-    }
-  }
-
-  async function handleExport() {
-    try {
-      const path = await exportReport();
+      const path = await exportReport(unsanitized);
       setStatusText(translations.en.status.reportExported(path), translations.vi.status.reportExported(path));
+      setExportedReport({ path, diagnostic: unsanitized });
     } catch (error) {
       setStatusText(error instanceof Error ? error.message : translations.en.status.exportFailed, error instanceof Error ? error.message : translations.vi.status.exportFailed);
     }
   }
 
+  async function handleOpenExportFolder() {
+    if (!exportedReport) return;
+    setOpeningExportFolder(true);
+    try {
+      await openExportLocation(exportedReport.path);
+      setStatusText(translations.en.status.exportFolderOpened, translations.vi.status.exportFolderOpened);
+    } catch (error) {
+      setStatusText(getErrorMessage(error, translations.en.status.exportFolderFailed), getErrorMessage(error, translations.vi.status.exportFolderFailed));
+    } finally {
+      setOpeningExportFolder(false);
+    }
+  }
+
+  async function refreshQuarantine() {
+    setBusy(true);
+    try {
+      setQuarantine(await listQuarantineEntries());
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearExpiredEntries() {
+    setBusy(true);
+    try {
+      await clearExpiredQuarantine();
+      setQuarantine(await listQuarantineEntries());
+    } catch (error) {
+      setStatusText(getErrorMessage(error, translations.en.status.actionFailed), getErrorMessage(error, translations.vi.status.actionFailed));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyPath(path: string) {
+    try {
+      await navigator.clipboard.writeText(path);
+      setStatusText(translations.en.status.pathCopied, translations.vi.status.pathCopied);
+    } catch (error) {
+      setStatusText(getErrorMessage(error, translations.en.status.actionFailed), getErrorMessage(error, translations.vi.status.actionFailed));
+    }
+  }
+
+  async function revealPath(path: string) {
+    try {
+      await openInFileManager(path);
+    } catch (error) {
+      setStatusText(getErrorMessage(error, translations.en.status.actionFailed), getErrorMessage(error, translations.vi.status.actionFailed));
+    }
+  }
+
   async function updateSettings(next: SchedulerSettings) {
+    const previous = settings;
     setSettings(next);
-    const saved = await saveSchedulerSettings(next);
-    setSettings(saved);
+    try {
+      const saved = await saveSchedulerSettings(next);
+      setSettings(saved);
+    } catch (error) {
+      setSettings(previous);
+      setStatusText(getErrorMessage(error, translations.en.status.actionFailed), getErrorMessage(error, translations.vi.status.actionFailed));
+    }
+  }
+
+  async function updateAllowWhenRunning(checked: boolean) {
+    if (!settings) return;
+    if (checked && !window.confirm(copy.automation.allowRunningWarning)) return;
+    await updateSettings({ ...settings, clean_when_claude_running: checked });
   }
 
   const tabs: { id: Tab; label: string; short: string }[] = [
     { id: "overview", label: copy.tabs.overview, short: copy.tabShort.overview },
+    { id: "analysis", label: copy.tabs.analysis, short: copy.tabShort.analysis },
+    { id: "quarantine", label: copy.tabs.quarantine, short: copy.tabShort.quarantine },
     { id: "history", label: copy.tabs.history, short: copy.tabShort.history },
     { id: "automation", label: copy.tabs.automation, short: copy.tabShort.automation },
     { id: "issues", label: copy.tabs.issues, short: copy.tabShort.issues },
@@ -349,9 +426,13 @@ export default function App() {
                 <RefreshCw size={18} />
                 {copy.actions.scan}
               </button>
-              <button className="secondary-button" type="button" onClick={handleExport}>
+              <button className="secondary-button" type="button" onClick={() => void handleExport()}>
                 <Download size={18} />
                 {copy.actions.export}
+              </button>
+              <button className="secondary-button" type="button" onClick={() => void handleExport(true)} title={copy.status.unsanitizedWarning}>
+                <AlertTriangle size={18} />
+                {copy.actions.exportUnsanitized}
               </button>
               <button className="primary-button" type="button" onClick={handleClean} disabled={busy || selectedPaths.size === 0}>
                 <Trash2 size={18} />
@@ -441,17 +522,44 @@ export default function App() {
                 </div>
                 <div className="mt-4 grid gap-2">
                   {visibleNodes.map((node) => (
-                    <label key={node.path} className="path-row">
-                      <input className="mt-1 h-4 w-4 accent-accent" type="checkbox" checked={selectedPaths.has(node.path)} onChange={() => toggleNode(node)} />
+                    <div key={node.path} className="path-row">
+                      <input className="mt-1 h-4 w-4 accent-accent" type="checkbox" checked={selectedPaths.has(node.path)} onChange={() => toggleNode(node)} aria-label={`${copy.actions.cleanNow}: ${localizeDynamicText(language, node.label)}`} />
                       <span className="min-w-0">
                         <span className="block font-semibold">{localizeDynamicText(language, node.label)}</span>
                         <span className="block break-all text-xs leading-5 text-muted">{node.path}</span>
                       </span>
                       <span className="ml-auto shrink-0 text-sm font-semibold text-text">{formatBytes(node.size_bytes)}</span>
-                    </label>
+                      <button className="icon-button shrink-0" type="button" title={copy.actions.copyPath} onClick={() => void copyPath(node.path)}><Clipboard size={15} /></button>
+                      <button className="icon-button shrink-0" type="button" title={copy.actions.open} onClick={() => void revealPath(node.path)}><ExternalLink size={15} /></button>
+                      <button className="secondary-button shrink-0" type="button" onClick={() => { setAnalysisRoot(node.path); setTab("analysis"); }}>{copy.actions.details}</button>
+                    </div>
                   ))}
                 </div>
               </section>
+            </div>
+          )}
+
+          {tab === "analysis" && (
+            <AnalysisPanel
+              roots={visibleRoots}
+              requestedRoot={analysisRoot}
+              copy={copy}
+              onError={(message) => setStatusText(message, localizeDynamicText("vi", message))}
+            />
+          )}
+
+          {tab === "quarantine" && (
+            <div className="space-y-3">
+              <div className="flex justify-end">
+                <button className="secondary-button" type="button" onClick={() => void clearExpiredEntries()} disabled={busy}>{copy.quarantine.clearExpired}</button>
+              </div>
+              <QuarantinePanel
+                entries={quarantine}
+                copy={copy}
+                busy={busy}
+                onRefresh={refreshQuarantine}
+                onError={(message) => setStatusText(message, localizeDynamicText("vi", message))}
+              />
             </div>
           )}
 
@@ -470,13 +578,13 @@ export default function App() {
                           <div className="mt-3 rounded border border-warn/30 bg-warn/10 p-3 text-xs text-warn">
                             <p className="font-black">{copy.history.errors}</p>
                             {item.errors.slice(0, 3).map((error) => (
-                              <p key={error} className="mt-1 break-words">{error}</p>
+                              <p key={`${error.path}-${error.message}`} className="mt-1 break-words">{error.message}</p>
                             ))}
                           </div>
                         )}
                       </div>
                       <div className="text-left md:text-right">
-                        <p className="font-black text-accent">{formatBytes(item.cleaned_bytes)}</p>
+                        <p className="font-black text-accent">{formatBytes(item.actual_reclaimed_bytes || item.cleaned_bytes)}</p>
                         <p className="mt-1 text-sm text-muted">{copy.history.remaining} {formatBytes(item.remaining_bytes)}</p>
                       </div>
                     </div>
@@ -491,10 +599,18 @@ export default function App() {
               <SettingPanel title={copy.automation.scheduler} icon={<Clock size={20} />}>
                 <Toggle label={copy.automation.enableAutomaticCleanup} checked={settings.enabled} onChange={(checked) => updateSettings({ ...settings, enabled: checked })} />
                 <Toggle label={copy.automation.runOnSchedule} checked={settings.schedule_enabled} onChange={(checked) => updateSettings({ ...settings, schedule_enabled: checked })} />
-                <label className="field-label">
-                  {copy.automation.cleanupTime}
-                  <input className="field-input" type="time" value={settings.schedule_time} onChange={(event) => updateSettings({ ...settings, schedule_time: event.target.value })} />
+                <label className="field-label">{copy.automation.frequency}
+                  <select className="field-input" value={settings.schedule_frequency} onChange={(event) => updateSettings({ ...settings, schedule_frequency: event.target.value as SchedulerSettings["schedule_frequency"] })}>
+                    <option value="daily">{copy.automation.daily}</option>
+                    <option value="weekly">{copy.automation.weekly}</option>
+                    <option value="monthly">{copy.automation.monthly}</option>
+                    <option value="startup">{copy.automation.startup}</option>
+                  </select>
                 </label>
+                {settings.schedule_frequency !== "startup" && <label className="field-label">{copy.automation.cleanupTime}<input className="field-input" type="time" value={settings.schedule_time} onChange={(event) => updateSettings({ ...settings, schedule_time: event.target.value })} /></label>}
+                {settings.schedule_frequency === "weekly" && <label className="field-label">{copy.automation.weeklyDay}<input className="field-input" type="number" min="1" max="7" value={settings.weekly_day} onChange={(event) => updateSettings({ ...settings, weekly_day: Number(event.target.value) })} /></label>}
+                {settings.schedule_frequency === "monthly" && <label className="field-label">{copy.automation.monthlyDay}<input className="field-input" type="number" min="1" max="31" value={settings.monthly_day} onChange={(event) => updateSettings({ ...settings, monthly_day: Number(event.target.value) })} /></label>}
+                <label className="field-label">{copy.automation.graceMinutes}<input className="field-input" type="number" min="1" max="180" value={settings.schedule_grace_minutes} onChange={(event) => updateSettings({ ...settings, schedule_grace_minutes: Number(event.target.value) })} /></label>
               </SettingPanel>
 
               <SettingPanel title={copy.automation.thresholds} icon={<Settings size={20} />}>
@@ -508,7 +624,37 @@ export default function App() {
                   {copy.automation.growthAlertGbHour}
                   <input className="field-input" type="number" min="0.1" step="0.1" value={settings.growth_alert_gb_per_hour} onChange={(event) => updateSettings({ ...settings, growth_alert_gb_per_hour: Number(event.target.value) })} />
                 </label>
-                <Toggle label={copy.automation.allowCleanupWhileClaudeRunning} checked={settings.clean_when_claude_running} onChange={(checked) => updateSettings({ ...settings, clean_when_claude_running: checked })} />
+                <Toggle label={copy.automation.allowCleanupWhileClaudeRunning} checked={settings.clean_when_claude_running} onChange={(checked) => void updateAllowWhenRunning(checked)} />
+                <label className="field-label">{copy.automation.quarantineRetention}
+                  <select className="field-input" value={settings.quarantine_retention_days} onChange={(event) => updateSettings({ ...settings, quarantine_retention_days: Number(event.target.value) })}>
+                    <option value="1">{copy.automation.retention1}</option><option value="7">{copy.automation.retention7}</option><option value="14">{copy.automation.retention14}</option><option value="30">{copy.automation.retention30}</option><option value="-1">{copy.automation.retentionNever}</option>
+                  </select>
+                </label>
+              </SettingPanel>
+
+              <SettingPanel title={copy.automation.diskSpace} icon={<FolderSearch size={20} />}>
+                <Toggle label={copy.automation.enableDiskSpace} checked={settings.disk_space_enabled} onChange={(checked) => updateSettings({ ...settings, disk_space_enabled: checked })} />
+                <label className="field-label">{copy.automation.monitoredVolume}<input className="field-input" value={settings.monitored_volume} onChange={(event) => updateSettings({ ...settings, monitored_volume: event.target.value })} /></label>
+                <label className="field-label">{copy.automation.minimumFreeGb}<input className="field-input" type="number" min="0.5" step="0.5" value={settings.minimum_free_gb} onChange={(event) => updateSettings({ ...settings, minimum_free_gb: Number(event.target.value) })} /></label>
+                <label className="field-label">{copy.automation.minimumFreePercent}<input className="field-input" type="number" min="1" max="99" value={settings.minimum_free_percent ?? ""} onChange={(event) => updateSettings({ ...settings, minimum_free_percent: event.target.value ? Number(event.target.value) : null })} /></label>
+                <label className="field-label">{copy.automation.targetFreeGb}<input className="field-input" type="number" min="1" value={settings.target_free_gb} onChange={(event) => updateSettings({ ...settings, target_free_gb: Number(event.target.value) })} /></label>
+                <label className="field-label">{copy.automation.cooldownHours}<input className="field-input" type="number" min="1" max="168" value={settings.cleanup_cooldown_hours} onChange={(event) => updateSettings({ ...settings, cleanup_cooldown_hours: Number(event.target.value) })} /></label>
+                <label className="field-label">{copy.automation.maxCleanupGb}<input className="field-input" type="number" min="0.06" step="0.25" value={settings.max_cleanup_bytes / 1024 ** 3} onChange={(event) => updateSettings({ ...settings, max_cleanup_bytes: Number(event.target.value) * 1024 ** 3 })} /></label>
+                <label className="field-label">
+                  {copy.automation.notificationBehavior}
+                  <select className="field-input" value={settings.notification_behavior} onChange={(event) => updateSettings({ ...settings, notification_behavior: event.target.value })}>
+                    <option value="in_app">{copy.automation.notificationInApp}</option>
+                    <option value="silent">{copy.automation.notificationSilent}</option>
+                  </select>
+                </label>
+              </SettingPanel>
+
+              <SettingPanel title={copy.automation.startupSettings} icon={<Settings size={20} />}>
+                <Toggle label={copy.automation.launchAtLogin} checked={settings.launch_at_login} onChange={(checked) => updateSettings({ ...settings, launch_at_login: checked })} />
+                <Toggle label={copy.automation.startMinimized} checked={settings.start_minimized} onChange={(checked) => updateSettings({ ...settings, start_minimized: checked })} />
+                <Toggle label={copy.automation.scanOnStartup} checked={settings.scan_on_startup} onChange={(checked) => updateSettings({ ...settings, scan_on_startup: checked })} />
+                <Toggle label={copy.automation.safeCleanupOnStartup} checked={settings.startup_cleanup_enabled} onChange={(checked) => updateSettings({ ...settings, startup_cleanup_enabled: checked })} />
+                <label className="field-label">{copy.automation.startupDelay}<input className="field-input" type="number" min="5" max="3600" value={settings.startup_cleanup_delay_seconds} onChange={(event) => updateSettings({ ...settings, startup_cleanup_delay_seconds: Number(event.target.value) })} /></label>
               </SettingPanel>
             </div>
           )}
@@ -520,10 +666,30 @@ export default function App() {
         <SafetyDialog
           iconSrc={normalFrame}
           item={blockedSelection}
-          language={language}
+          copy={copy}
           busy={busy}
           onClose={() => setBlockedSelection(null)}
-          onForceClean={() => handleForceClean(blockedSelection)}
+        />
+      )}
+      {preview && (
+        <CleanupPreviewModal
+          preview={preview}
+          copy={copy}
+          language={language}
+          busy={busy}
+          onClose={() => { setPreview(null); setPendingRequest(null); }}
+          onConfirm={(quarantineCaution) => void confirmCleanup(quarantineCaution)}
+        />
+      )}
+      {cleanResult && <CleanupReportModal result={cleanResult} copy={copy} language={language} onClose={() => setCleanResult(null)} />}
+      {exportedReport && (
+        <ExportSuccessModal
+          path={exportedReport.path}
+          diagnostic={exportedReport.diagnostic}
+          copy={copy}
+          opening={openingExportFolder}
+          onClose={() => setExportedReport(null)}
+          onOpenFolder={() => void handleOpenExportFolder()}
         />
       )}
     </main>
@@ -533,21 +699,16 @@ export default function App() {
 function SafetyDialog({
   iconSrc,
   item,
-  language,
+  copy,
   busy,
   onClose,
-  onForceClean,
 }: {
   iconSrc: string;
   item: BlockedSelection;
-  language: Language;
+  copy: Copy;
   busy: boolean;
   onClose: () => void;
-  onForceClean: () => Promise<void>;
 }) {
-  const [countdown, setCountdown] = useState<number | null>(null);
-  const [forceTriggered, setForceTriggered] = useState(false);
-
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -555,34 +716,6 @@ function SafetyDialog({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
-
-  useEffect(() => {
-    if (countdown === null) return;
-    if (countdown <= 0) {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      setCountdown((current) => current === null ? null : current - 1);
-    }, 1000);
-
-    return () => window.clearTimeout(timer);
-  }, [countdown]);
-
-  const isVi = language === "vi";
-  const countdownActive = countdown !== null && countdown > 0;
-  const countdownFinished = countdown === 0;
-  const overrideStarted = countdown !== null || forceTriggered;
-
-  function handleForceButtonClick() {
-    if (countdownFinished) {
-      setForceTriggered(true);
-      void onForceClean();
-      return;
-    }
-
-    setCountdown(3);
-  }
 
   return (
     <div
@@ -599,12 +732,12 @@ function SafetyDialog({
             <img src={iconSrc} alt="" draggable={false} />
           </div>
           <div className="min-w-0">
-            <p className="safety-modal-kicker">{isVi ? "Warden đã chặn" : "Blocked by warden"}</p>
+            <p className="safety-modal-kicker">{copy.safetyDialog.kicker}</p>
             <h2 id="safety-dialog-title" className="safety-modal-title">
-              {isVi ? "Giữ nguyên mục này" : "This item stays untouched"}
+              {copy.safetyDialog.title}
             </h2>
           </div>
-          <button className="safety-modal-close" type="button" onClick={onClose} aria-label={isVi ? "Đóng cảnh báo" : "Close warning"}>
+          <button className="safety-modal-close" type="button" onClick={onClose} aria-label={copy.actions.close}>
             <X size={18} />
           </button>
         </div>
@@ -612,49 +745,18 @@ function SafetyDialog({
         <div className="safety-modal-body">
           <div className="safety-modal-callout">
             <AlertTriangle size={18} />
-            <p>
-              {isVi
-                ? `Mục "${item.label}" đang được đánh dấu "${item.safety}". Nó có thể chứa chat, project, phiên làm việc, cài đặt hoặc dữ liệu workspace của Claude.`
-                : `"${item.label}" is marked "${item.safety}". It may contain chats, projects, sessions, settings, or Claude workspace data.`}
-            </p>
+            <p>{copy.safetyDialog.description(item.label, item.safety)}</p>
           </div>
 
           <div>
-            <p className="safety-modal-path-label">{isVi ? "Đường dẫn bị giữ lại" : "Path left untouched"}</p>
+            <p className="safety-modal-path-label">{copy.safetyDialog.pathLabel}</p>
             <code className="safety-modal-path">{item.path}</code>
           </div>
         </div>
 
         <div className="safety-modal-footer">
-          <button className="secondary-button safety-modal-action" type="button" onClick={onClose} disabled={busy}>
-            {isVi ? "Đã hiểu" : "Understood"}
-          </button>
-          <button
-            className="danger-button safety-modal-force"
-            type="button"
-            onClick={handleForceButtonClick}
-            disabled={busy || forceTriggered || countdownActive}
-            autoFocus
-          >
-            {forceTriggered
-              ? isVi
-                ? "Đang xóa..."
-                : "Deleting..."
-              : countdownActive
-              ? isVi
-                ? `Chờ ${countdown}s`
-                : `Wait ${countdown}s`
-              : countdownFinished
-              ? isVi
-                ? "Bấm lần nữa để xóa"
-                : "Click again to delete"
-              : overrideStarted
-              ? isVi
-                ? "Bấm lần nữa để xóa"
-                : "Click again to delete"
-              : isVi
-                ? "Tôi hiểu và vẫn xóa"
-                : "I understand and delete"}
+          <button className="secondary-button safety-modal-action" type="button" onClick={onClose} disabled={busy} autoFocus>
+            {copy.safetyDialog.understood}
           </button>
         </div>
       </section>
@@ -725,9 +827,4 @@ function claudeActivityLabel(copy: Copy, activity?: ClaudeActivity) {
 function claudeWarning(copy: Copy, activity: ClaudeActivity) {
   if (activity === "background") return copy.warnings.claudeBackground;
   return copy.warnings.claudeRunning;
-}
-
-function cleanupBlockedMessage(copy: Copy, activity: ClaudeActivity) {
-  if (activity === "background") return copy.status.cleanBlockedBackground;
-  return copy.status.cleanBlocked;
 }
