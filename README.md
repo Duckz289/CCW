@@ -1,6 +1,6 @@
 # Claude Cache Warden
 
-> Bản phát triển hiện tại triển khai roadmap Phase 1-3 trong phạm vi Claude-only. Phase 4 và kiến trúc nhiều nhà cung cấp không nằm trong ứng dụng.
+
 
 Claude Cache Warden là ứng dụng desktop nhẹ viết bằng Tauri, dùng để quét và dọn cache của Claude Desktop / Cowork trên Windows và macOS.
 
